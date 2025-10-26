@@ -1,0 +1,3 @@
+[submodule "subprojects/fff"]
+	path = subprojects/fff
+	url = https://github.com/meekrosoft/fff
