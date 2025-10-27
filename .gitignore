@@ -54,6 +54,9 @@ dkms.conf
 # debug information files
 *.dwo
 
+# Meson stuff
 /subprojects/*
 !/subprojects/*.wrap
 /.cache
+
+GEMINI.md
