@@ -13,4 +13,7 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
+#define MIN(x, y) ((y) ^ (((x) ^ (y)) & -((x) < (y))))
+#define MAX(x, y) ((x) ^ (((x) ^ (y)) & -((x) < (y))))
+
 #endif /* ifndef UTILS_H */

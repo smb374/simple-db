@@ -1,6 +1,8 @@
 inc = include_directories('../include')
 
 db_srcs = [
-  './btree.c'
+  './btree.c',
+  './dblock.c',
+  './page.c',
 ]
 db_lib = library('simple-db-lib', db_srcs, include_directories : inc)
