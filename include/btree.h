@@ -17,7 +17,7 @@ enum {
 };
 
 struct LeafEnt {
-    char key[MAX_KEY];
+    u8 key[MAX_KEY];
     u8 val_type;
     u8 _pad[3];
     union {
@@ -31,8 +31,8 @@ struct LeafEnt {
 typedef struct LeafEnt LeafEnt;
 
 struct IntEnt {
-    char key[MAX_KEY];
-    u32 child_page;
+    u8 key[MAX_KEY];
+    u32 cpage;
 };
 typedef struct IntEnt IntEnt;
 
@@ -49,12 +49,13 @@ typedef struct NodeHeader NodeHeader;
 _Static_assert(sizeof(struct NodeHeader) == NODE_HEADER_SIZE, "NoddeHeeader should be NODE_HEADER_SIZE long");
 
 #define MAX_NODE_ENTS ((PAGE_SIZE - NODE_HEADER_SIZE) / sizeof(struct LeafEnt))
+#define MIN_NODE_ENTS (MAX_NODE_ENTS / 2)
 
 // Nodes are all 1 page sized
 #define LEAF_PADDING (PAGE_SIZE - (NODE_HEADER_SIZE + sizeof(struct LeafEnt) * MAX_NODE_ENTS))
 struct LeafNode {
     struct NodeHeader header;
-    struct LeafEnt data[MAX_NODE_ENTS];
+    struct LeafEnt entries[MAX_NODE_ENTS];
     u8 _pad[LEAF_PADDING];
 };
 typedef struct LeafNode LeafNode;
@@ -65,8 +66,8 @@ _Static_assert(sizeof(struct LeafNode) == PAGE_SIZE, "LeafNode should be PAGE_SI
 #define INT_PADDING (PAGE_SIZE - (NODE_HEADER_SIZE + sizeof(struct IntEnt) * MAX_NODE_ENTS + sizeof(u32)))
 struct IntNode {
     struct NodeHeader header;
-    struct IntEnt key_ptrs[MAX_NODE_ENTS];
-    u32 tail_coff;
+    struct IntEnt entries[MAX_NODE_ENTS];
+    u32 tail_page;
     u8 _pad[INT_PADDING];
 };
 typedef struct IntNode IntNode;
@@ -81,8 +82,11 @@ struct BTree {
     struct PageBank bank;
 };
 
-int btree_create(struct BTree *t, int fd);
-int btree_open(struct BTree *t, const char *path);
-void btree_close(struct BTree *t);
+int btree_create(struct BTree *tree, i32 fd);
+int btree_open(struct BTree *tree, const char *path);
+void btree_close(struct BTree *tree);
+
+i32 btree_search(struct BTree *tree, const u8 *key, void *value_out, u32 *len_out);
+i32 btree_insert(struct BTree *tree, const u8 *key, const void *val, u32 len);
 
 #endif /* ifndef BTREE_H */

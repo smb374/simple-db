@@ -1,6 +1,7 @@
 #ifndef PAGE_H
 #define PAGE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "utils.h"
@@ -14,7 +15,7 @@
 #define INVALID_PAGE ((u32) - 1)
 
 struct PageBank {
-    int fd; // Backend, -1 if in memory, else should be a valid fd to a file.
+    i32 fd; // Backend, -1 if in memory, else should be a valid fd to a file.
     u64 size; // Total size of the pagebank
     u32 curr_dblk; // Cache current DATA_NORMAL block page number.
     void *pages; // Pages, either by calloc/realloc (in-mem) or mmap (file-backed)
@@ -23,7 +24,7 @@ struct PageBank {
 struct Superblock {
     u32 magic; // Magic number
     u32 version; // Version number
-    u32 root_offset; // Offset to root node, should be first free page.
+    u32 root_page; // Offset to root node, should be first free page.
     u32 total_pages; // Total pages in file
     u32 bitmap_pages; // Number of pages used for bitmap
     u32 page_size; // Should be PAGE_SIZE (4096)
@@ -36,7 +37,7 @@ _Static_assert(sizeof(struct Superblock) == PAGE_SIZE, "Superblock should be PAG
 
 static inline u32 *get_bitmap(struct PageBank *b) { return (u32 *) ((u8 *) b->pages + PAGE_SIZE); }
 
-static inline int is_page_set(struct PageBank *b, u32 page_num) {
+static inline bool is_page_set(struct PageBank *b, u32 page_num) {
     u32 *bitmap = get_bitmap(b);
     u32 mask_idx = page_num / 32;
     u32 bit_idx = page_num % 32;
@@ -59,12 +60,12 @@ static inline void unset_page(struct PageBank *b, u32 page_num) {
 
 static inline struct Superblock *get_superblock(struct PageBank *b) { return (struct Superblock *) b->pages; }
 
-void *get_page(struct PageBank *bank, u32 page_num);
-u32 find_free_page(struct PageBank *bank);
-int resize(struct PageBank *b, u64 new_size);
+void *get_page(struct PageBank *b, u32 page_num);
+u32 find_free_page(struct PageBank *b);
+i32 resize(struct PageBank *b, u64 new_size);
 u32 alloc_page(struct PageBank *b);
-int bank_create(struct PageBank *b, int fd);
-int bank_open(struct PageBank *b, const char *path);
+i32 bank_create(struct PageBank *b, i32 fd);
+i32 bank_open(struct PageBank *b, const char *path);
 void bank_close(struct PageBank *b);
 
 #endif /* ifndef PAGE_H */

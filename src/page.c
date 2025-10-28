@@ -18,7 +18,7 @@ void *get_page(struct PageBank *b, u32 page_num) {
     return (char *) b->pages + page_num * PAGE_SIZE;
 }
 
-static inline int ffz(u32 mask) { return ffs(~mask) - 1; }
+static inline i32 ffz(u32 mask) { return ffsl(~mask) - 1; }
 
 u32 find_free_page(struct PageBank *b) {
     struct Superblock *sb = (struct Superblock *) b->pages;
@@ -32,7 +32,7 @@ u32 find_free_page(struct PageBank *b) {
         if (bitmap[i] == 0xFFFFFFFF)
             continue;
 
-        int bit = ffz(bitmap[i]);
+        i32 bit = ffz(bitmap[i]);
         if (bit >= 0) {
             u32 page = i * 32 + bit;
             if (page < start_page)
@@ -46,29 +46,27 @@ u32 find_free_page(struct PageBank *b) {
     return INVALID_PAGE; // No free pages
 }
 
-int resize(struct PageBank *b, u64 new_size) {
+i32 resize(struct PageBank *b, u64 new_size) {
     new_size = (new_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (b->fd == -1) {
-        void *old_addr = b->pages;
-        b->pages = realloc(b->pages, new_size);
-        if (!b->pages) {
+        void *new_addr = realloc(b->pages, new_size);
+        if (!new_addr) {
             perror("realloc()");
-            b->pages = old_addr;
             return -1;
         }
+        b->pages = new_addr;
     } else {
         if (ftruncate(b->fd, new_size) < 0) {
             perror("ftruncate()");
             return -1;
         }
-        void *old_addr = b->pages;
-        b->pages = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
-        if (b->pages == MAP_FAILED) {
+        void *new_addr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
+        if (new_addr == MAP_FAILED) {
             perror("mmap()");
-            b->pages = old_addr;
             return -1;
         }
-        munmap(old_addr, b->size);
+        munmap(b->pages, b->size);
+        b->pages = new_addr;
     }
     b->size = new_size;
     return 0;
@@ -102,7 +100,7 @@ u32 alloc_page(struct PageBank *b) {
     return page_num;
 }
 
-int bank_create(struct PageBank *b, int fd) {
+i32 bank_create(struct PageBank *b, i32 fd) {
     b->fd = fd;
     b->size = PAGE_SIZE * INITIAL_PAGES;
     if (fd == -1) {
@@ -134,9 +132,9 @@ int bank_create(struct PageBank *b, int fd) {
     sb->fst_free_page = 1 + MAX_BITMAP_PAGES;
     sb->total_pages = INITIAL_PAGES;
     sb->page_size = PAGE_SIZE;
-    sb->root_offset = sb->fst_free_page * PAGE_SIZE;
+    sb->root_page = sb->fst_free_page;
     b->curr_dblk = sb->curr_dblk = INVALID_PAGE;
-    sb->head_dblk = 0;
+    sb->head_dblk = INVALID_PAGE;
 
     for (u32 i = 0; i <= sb->fst_free_page; i++) {
         set_page(b, i);
@@ -145,11 +143,11 @@ int bank_create(struct PageBank *b, int fd) {
     return 0;
 }
 
-int bank_open(struct PageBank *b, const char *path) {
+i32 bank_open(struct PageBank *b, const char *path) {
     if (!path) {
         return bank_create(b, -1);
     }
-    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    i32 fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0)
         return -1;
 

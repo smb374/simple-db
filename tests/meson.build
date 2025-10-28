@@ -12,3 +12,18 @@ test('test_page',
     )
 )
 
+test('test_dblock',
+    executable('test_dblock_runner', 'test_dblock.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)
+
+test('test_btree',
+    executable('test_btree_runner', 'test_btree.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

@@ -59,5 +59,10 @@ struct DataBlockHuge {
 #define DATA_HUGE_SPACE (PAGE_SIZE - sizeof(struct DataBlockHuge))
 
 struct VPtr write_huge_data(struct PageBank *b, void *data, u32 len);
+i32 read_huge_data(struct PageBank *b, void *data, struct VPtr ptr);
+void delete_huge_data(struct PageBank *b, struct VPtr ptr);
+struct VPtr write_normal_data(struct PageBank *b, void *data, u16 len);
+i32 read_normal_data(struct PageBank *b, void *data, struct VPtr ptr);
+void delete_normal_data(struct PageBank *b, struct VPtr ptr);
 
 #endif /* ifndef DBLOCK_H */
