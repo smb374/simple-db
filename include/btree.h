@@ -66,8 +66,8 @@ _Static_assert(sizeof(struct LeafNode) == PAGE_SIZE, "LeafNode should be PAGE_SI
 #define INT_PADDING (PAGE_SIZE - (NODE_HEADER_SIZE + sizeof(struct IntEnt) * MAX_NODE_ENTS + sizeof(u32)))
 struct IntNode {
     struct NodeHeader header;
+    u32 head_page;
     struct IntEnt entries[MAX_NODE_ENTS];
-    u32 tail_page;
     u8 _pad[INT_PADDING];
 };
 typedef struct IntNode IntNode;
@@ -88,5 +88,6 @@ void btree_close(struct BTree *tree);
 
 i32 btree_search(struct BTree *tree, const u8 *key, void *value_out, u32 *len_out);
 i32 btree_insert(struct BTree *tree, const u8 *key, const void *val, u32 len);
+i32 btree_delete(struct BTree *tree, const u8 *key);
 
 #endif /* ifndef BTREE_H */
