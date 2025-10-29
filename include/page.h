@@ -24,7 +24,7 @@ struct PageBank {
 struct Superblock {
     u32 magic; // Magic number
     u32 version; // Version number
-    u32 root_page; // Offset to root node, should be first free page.
+    u32 root_page; // Offset to root node
     u32 total_pages; // Total pages in file
     u32 bitmap_pages; // Number of pages used for bitmap
     u32 page_size; // Should be PAGE_SIZE (4096)
