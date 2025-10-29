@@ -210,4 +210,3 @@ int main(void) {
     RUN_TEST(test_defrag_normal_page);
     return UNITY_END();
 }
-

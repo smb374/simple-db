@@ -59,4 +59,7 @@ dkms.conf
 !/subprojects/*.wrap
 /.cache
 
+# perf stuff
+perf.data*
+
 GEMINI.md
