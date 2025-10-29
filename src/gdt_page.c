@@ -104,29 +104,32 @@ static u32 find_free_page(struct GdtPageBank *b, u32 hint) {
 }
 
 static i32 grow(struct GdtPageBank *b) {
-    u32 new_size = (gdt_get_superblock(b)->total_pages + GROUP_SIZE) * PAGE_SIZE;
-    if (b->fd == -1) {
-        void *new_addr = realloc(b->pages, new_size);
-        if (!new_addr) {
-            perror("realloc()");
-            return -1;
-        }
-        b->pages = new_addr;
-    } else {
-        if (ftruncate(b->fd, new_size) < 0) {
-            perror("ftruncate()");
-            return -1;
-        }
-        void *new_addr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
-        if (new_addr == MAP_FAILED) {
-            perror("mmap()");
-            return -1;
-        }
-        munmap(b->pages, b->size);
-        b->pages = new_addr;
-    }
-    b->size = new_size;
     struct GdtSuperblock *sb = gdt_get_superblock(b);
+    u32 new_size = (sb->total_pages + GROUP_SIZE) * PAGE_SIZE;
+    if (new_size > b->size) {
+        if (b->fd == -1) {
+            void *new_addr = realloc(b->pages, new_size);
+            if (!new_addr) {
+                perror("realloc()");
+                return -1;
+            }
+            b->pages = new_addr;
+        } else {
+            if (ftruncate(b->fd, new_size) < 0) {
+                perror("ftruncate()");
+                return -1;
+            }
+            void *new_addr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
+            if (new_addr == MAP_FAILED) {
+                perror("mmap()");
+                return -1;
+            }
+            munmap(b->pages, b->size);
+            b->pages = new_addr;
+        }
+        b->size = new_size;
+        sb = gdt_get_superblock(b);
+    }
     // Update group metadata
     u32 ngidx = sb->total_groups;
     struct GroupDescriptor *gdt = get_gdt(b);
@@ -191,6 +194,9 @@ i32 gdt_bank_create(struct GdtPageBank *b, i32 fd) {
     sb->gdt_pages = MAX_GDTS;
     sb->total_pages = INITIAL_PAGES;
     sb->total_groups = 1;
+    sb->root_page = INVALID_PAGE;
+    b->curr_dblk = sb->curr_dblk = INVALID_PAGE;
+    sb->head_dblk = INVALID_PAGE;
 
     // Initialize GDT
     struct GroupDescriptor *gdt = get_gdt(b);
@@ -249,7 +255,7 @@ i32 gdt_bank_open(struct GdtPageBank *b, const char *path) {
 
     struct GdtSuperblock *s = gdt_get_superblock(b);
     if (s->magic != MAGIC || s->version != VERSION || s->page_size != PAGE_SIZE || s->gdt_pages != MAX_GDTS ||
-        b->size != s->total_pages * PAGE_SIZE) {
+        b->size < s->total_pages * PAGE_SIZE) {
         fprintf(stderr, "Error: Invalid database file format or size mismatch.\n");
         munmap(b->pages, b->size);
         close(b->fd);

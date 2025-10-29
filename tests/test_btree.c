@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "page.h"
+#include "gdt_page.h"
 #include "unity.h"
 
 static struct BTree tree;
@@ -44,12 +44,66 @@ static void make_key(u8 *key_buf, const char *key_str) {
     strcpy((char *) key_buf, key_str);
 }
 
-void setUp(void) {
-    // Use in-memory database for all tests
-    btree_create(&tree, -1);
+// Suite-level setup, called once before all tests
+int suite_setUp(void) {
+    // The expensive allocation is done only once.
+    return btree_create(&tree, -1);
 }
 
-void tearDown(void) { btree_close(&tree); }
+// Suite-level teardown, called once after all tests
+int suite_tearDown(void) {
+    btree_close(&tree);
+    return 0;
+}
+
+// Per-test setup, now lightweight
+void setUp(void) {
+    // 1. Reset the underlying page bank metadata
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct GroupDescriptor *gdt = get_gdt(&tree.bank);
+
+    for (u32 i = 0; i < sb->total_groups; i++) {
+        if (gdt[i].group_start != INVALID_PAGE) {
+            u32 *bitmap = gdt_get_page(&tree.bank, gdt[i].group_start);
+            memset(bitmap, 0, PAGE_SIZE * GROUP_BITMAPS);
+        }
+    }
+
+    // 2. Reset the superblock to its initial state
+    sb->magic = MAGIC;
+    sb->version = VERSION;
+    sb->page_size = PAGE_SIZE;
+    sb->gdt_pages = MAX_GDTS;
+    sb->total_pages = INITIAL_PAGES;
+    sb->total_groups = 1;
+
+    // 3. Reset the GDT entries
+    for (u32 i = 0; i < GDT_SIZE_PER_PAGE * MAX_GDTS; i++) {
+        gdt[i].group_start = INVALID_PAGE;
+    }
+    gdt[0].group_start = HEAD_OFFSET;
+    gdt[0].free_pages = GROUP_SIZE - GROUP_BITMAPS;
+    u32 *bitmap = gdt_get_page(&tree.bank, gdt[0].group_start);
+    bitmap[0] = 0x3;
+
+    // 4. Reset B-Tree specific state (create a new root node)
+    u32 root_page_num = gdt_alloc_page(&tree.bank, INVALID_PAGE);
+    sb->root_page = root_page_num;
+    struct LeafNode *root = gdt_get_page(&tree.bank, root_page_num);
+    root->header.type = BNODE_LEAF;
+    root->header.nkeys = 0;
+    root->header.parent_page = INVALID_PAGE;
+    root->header.prev_page = INVALID_PAGE;
+    root->header.next_page = INVALID_PAGE;
+
+    // 5. Reset dblock list state
+    tree.bank.curr_dblk = sb->curr_dblk = INVALID_PAGE;
+    sb->head_dblk = INVALID_PAGE;
+}
+
+void tearDown(void) {
+    // No longer needed, as we don't clean up after each test
+}
 
 void test_insert_and_search_single_key(void) {
     u8 key[MAX_KEY];
@@ -118,8 +172,8 @@ void test_insertion_causes_leaf_split(void) {
         i32 ret = btree_insert(&tree, key, val, strlen(val) + 1);
         TEST_ASSERT_EQUAL(0, ret);
 
-        struct Superblock *sb = get_superblock(&tree.bank);
-        struct NodeHeader *root_header = get_page(&tree.bank, sb->root_page);
+        struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+        struct NodeHeader *root_header = gdt_get_page(&tree.bank, sb->root_page);
         if (root_header->type == BNODE_LEAF) {
             TEST_ASSERT_EQUAL_HEX32(INVALID_PAGE, root_header->next_page);
         }
@@ -143,8 +197,8 @@ void test_insertion_causes_leaf_split(void) {
     }
 
     // Check that root is now an internal node
-    struct Superblock *sb = get_superblock(&tree.bank);
-    struct NodeHeader *root_header = get_page(&tree.bank, sb->root_page);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct NodeHeader *root_header = gdt_get_page(&tree.bank, sb->root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 
@@ -226,8 +280,8 @@ void test_delete_cause_redistribute(void) {
     TEST_ASSERT_EQUAL(0, ret);
 
     // 5. Check the parent (root) separator key is now "key_16"
-    struct Superblock *sb = get_superblock(&tree.bank);
-    struct IntNode *root = get_page(&tree.bank, sb->root_page);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct IntNode *root = gdt_get_page(&tree.bank, sb->root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root->header.type);
     TEST_ASSERT_EQUAL(1, root->header.nkeys);
     u8 new_sep_key[MAX_KEY];
@@ -266,8 +320,8 @@ void test_delete_cause_merge_and_root_shrink(void) {
 
     // Verification:
     // 1. The root should now be a LEAF node again (tree height shrunk).
-    struct Superblock *sb = get_superblock(&tree.bank);
-    struct NodeHeader *root_header = get_page(&tree.bank, sb->root_page);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct NodeHeader *root_header = gdt_get_page(&tree.bank, sb->root_page);
     TEST_ASSERT_EQUAL(BNODE_LEAF, root_header->type);
 
     // 2. The new root leaf should have 14 + 15 = 29 keys.
@@ -297,8 +351,8 @@ void test_value_storage_types(void) {
     char inline_val[50] = "This is an inline value";
     btree_insert(&tree, key1, inline_val, strlen(inline_val) + 1);
 
-    struct Superblock *sb = get_superblock(&tree.bank);
-    struct LeafNode *root = get_page(&tree.bank, sb->root_page);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct LeafNode *root = gdt_get_page(&tree.bank, sb->root_page);
 
     bool exact_match = false;
     u8 slot = leaf_find_slot(root, key1, &exact_match);
@@ -314,7 +368,7 @@ void test_value_storage_types(void) {
     normal_val[99] = '\0';
     btree_insert(&tree, key2, normal_val, 100);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key2, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -328,7 +382,7 @@ void test_value_storage_types(void) {
     huge_val[4999] = '\0';
     btree_insert(&tree, key3, huge_val, 5000);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key3, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -352,7 +406,7 @@ void test_value_size_boundaries(void) {
     u8 key[MAX_KEY];
     char val[5000];
 
-    struct Superblock *sb = get_superblock(&tree.bank);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
     struct LeafNode *root;
     bool exact_match;
     u8 slot;
@@ -362,7 +416,7 @@ void test_value_size_boundaries(void) {
     memset(val, 'X', 63);
     btree_insert(&tree, key, val, 63);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -373,7 +427,7 @@ void test_value_size_boundaries(void) {
     memset(val, 'Y', 64);
     btree_insert(&tree, key, val, 64);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -384,7 +438,7 @@ void test_value_size_boundaries(void) {
     memset(val, 'Z', 4000);
     btree_insert(&tree, key, val, 4000);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -395,7 +449,7 @@ void test_value_size_boundaries(void) {
     memset(val, 'W', 4001);
     btree_insert(&tree, key, val, 4001);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -413,7 +467,7 @@ void test_update_changes_value_type(void) {
     u8 key[MAX_KEY];
     make_key(key, "update_test");
 
-    struct Superblock *sb = get_superblock(&tree.bank);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
     struct LeafNode *root;
     bool exact_match;
     u8 slot;
@@ -422,7 +476,7 @@ void test_update_changes_value_type(void) {
     char small_val[20] = "small";
     btree_insert(&tree, key, small_val, strlen(small_val) + 1);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -434,7 +488,7 @@ void test_update_changes_value_type(void) {
     medium_val[99] = '\0';
     btree_insert(&tree, key, medium_val, 100);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -446,7 +500,7 @@ void test_update_changes_value_type(void) {
     large_val[4999] = '\0';
     btree_insert(&tree, key, large_val, 5000);
 
-    root = get_page(&tree.bank, sb->root_page);
+    root = gdt_get_page(&tree.bank, sb->root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -492,8 +546,8 @@ void test_internal_node_split(void) {
     }
 
     // Root should be internal node with height > 1
-    struct Superblock *sb = get_superblock(&tree.bank);
-    struct NodeHeader *root_header = get_page(&tree.bank, sb->root_page);
+    struct GdtSuperblock *sb = gdt_get_superblock(&tree.bank);
+    struct NodeHeader *root_header = gdt_get_page(&tree.bank, sb->root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 
@@ -672,6 +726,10 @@ void test_file_persistence(void) {
 }
 
 int main(void) {
+    if (suite_setUp() != 0) {
+        return -1; // Exit if setup fails
+    }
+
     UNITY_BEGIN();
     // Insert & Search tests
     RUN_TEST(test_insert_and_search_single_key);
@@ -692,5 +750,5 @@ int main(void) {
     RUN_TEST(test_empty_tree_operations);
     RUN_TEST(test_file_persistence);
 
-    return UNITY_END();
+    return suite_tearDown() + UNITY_END();
 }

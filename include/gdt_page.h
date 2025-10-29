@@ -19,6 +19,7 @@
 struct GdtPageBank {
     i32 fd; // Backend, -1 if in memory, else should be a valid fd to a file.
     u32 size; // Total size of the pagebank
+    u32 curr_dblk; // Cache current DATA_NORMAL block page number.
     void *pages; // Pages, either by calloc/realloc (in-mem) or mmap (file-backed)
 };
 
@@ -26,10 +27,13 @@ struct GdtSuperblock {
     u32 magic; // Magic number
     u32 version; // Version number
     u32 page_size; // Should be PAGE_SIZE (4096)
-    u32 gdt_pages; // Number offf GDTs, should be MAX_GDTS
+    u32 gdt_pages; // Number of GDTs, should be MAX_GDTS
     u32 total_pages; // Total pages in file
     u32 total_groups; // Total groups in file
-    u8 _pad[PAGE_SIZE - 24];
+    u32 root_page;
+    u32 curr_dblk; // Cache current DATA_NORMAL block page number.
+    u32 head_dblk; // Head of the DATA_NORMAL block list by page number.
+    u8 _pad[PAGE_SIZE - 36];
 };
 _Static_assert(sizeof(struct GdtSuperblock) == PAGE_SIZE, "Superblock should be PAGE_SIZE long");
 
