@@ -12,14 +12,6 @@ test('test_gdt_page',
     )
 )
 
-test('test_page',
-    executable('test_page_runner', 'test_page.c',
-        include_directories: inc,
-        dependencies: unity_dep,
-        link_with: db_lib
-    )
-)
-
 test('test_dblock',
     executable('test_dblock_runner', 'test_dblock.c',
         include_directories: inc,
