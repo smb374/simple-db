@@ -194,7 +194,7 @@ i32 gdt_bank_create(struct GdtPageBank *b, i32 fd) {
     sb->gdt_pages = MAX_GDTS;
     sb->total_pages = INITIAL_PAGES;
     sb->total_groups = 1;
-    sb->root_page = INVALID_PAGE;
+    sb->_root_page = INVALID_PAGE;
     b->curr_dblk = sb->curr_dblk = INVALID_PAGE;
     sb->head_dblk = INVALID_PAGE;
 
@@ -207,7 +207,7 @@ i32 gdt_bank_create(struct GdtPageBank *b, i32 fd) {
     }
 
     // Initialize the first group
-    gdt[0].group_start = 1 + MAX_GDTS;
+    gdt[0].group_start = HEAD_OFFSET;
     gdt[0].free_pages = GROUP_SIZE - GROUP_BITMAPS;
 
     // Initialize the first group's bitmap

@@ -2,12 +2,12 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 
 #include "dblock.h"
 #include "gdt_page.h"
-#include "stdio.h"
 #include "utils.h"
 
 static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
@@ -107,7 +107,7 @@ static void delete_entry_value(struct BTree *tree, struct LeafEnt *entry) {
     }
 }
 
-static u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint) {
+u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint) {
     u32 page = gdt_alloc_page(b, hint);
     struct NodeHeader *header = gdt_get_page(b, page);
     header->type = type;
@@ -156,7 +156,8 @@ i32 btree_create(struct BTree *tree, i32 fd) {
 
     u32 root_page = gdt_alloc_page(b, INVALID_PAGE);
     struct GdtSuperblock *sb = gdt_get_superblock(b);
-    sb->root_page = root_page;
+    sb->_root_page = root_page;
+    tree->root_page = root_page;
     struct LeafNode *root = gdt_get_page(b, root_page);
     memset(root, 0, sizeof(struct LeafNode));
     root->header.type = BNODE_LEAF;
@@ -174,6 +175,7 @@ i32 btree_create(struct BTree *tree, i32 fd) {
 
 i32 btree_open(struct BTree *tree, const char *path) {
     gdt_bank_open(&tree->bank, path);
+    tree->root_page = gdt_get_superblock(&tree->bank)->_root_page;
 
     return 0;
 }
@@ -181,11 +183,9 @@ i32 btree_open(struct BTree *tree, const char *path) {
 void btree_close(struct BTree *tree) { gdt_bank_close(&tree->bank); }
 
 i32 btree_search(struct BTree *tree, const u8 *key, void *value_out, u32 *len_out) {
-    struct GdtSuperblock *sb = gdt_get_superblock(&tree->bank);
-
     u32 parent_stack[32]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
-    u32 page_num = btree_find_leaf(tree, sb->root_page, key, parent_stack, &stack_top);
+    u32 page_num = btree_find_leaf(tree, tree->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
         return -1;
     }
@@ -206,11 +206,9 @@ static i32 split_internal(struct BTree *tree, u32 ipage, const u8 *key, u32 rpag
 
 // key should be put in a MAX_KEY buf before passing in.
 i32 btree_insert(struct BTree *tree, const u8 *key, const void *val, u32 len) {
-    struct GdtSuperblock *sb = gdt_get_superblock(&tree->bank);
-
     u32 parent_stack[32]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
-    u32 page_num = btree_find_leaf(tree, sb->root_page, key, parent_stack, &stack_top);
+    u32 page_num = btree_find_leaf(tree, tree->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
         return -1;
     }
@@ -271,24 +269,45 @@ i32 btree_insert(struct BTree *tree, const u8 *key, const void *val, u32 len) {
         lpage = ppage;
         rpage = new_page;
     }
-    u32 nr_page = alloc_node(&tree->bank, BNODE_INT, lpage);
-    if (nr_page == INVALID_PAGE) {
+    assert(lpage == tree->root_page);
+    void *root_page_ptr = gdt_get_page(&tree->bank, tree->root_page);
+    struct NodeHeader *root_header = root_page_ptr;
+
+    u32 nlpage = alloc_node(&tree->bank, root_header->type, rpage);
+    if (nlpage == INVALID_PAGE) {
         return -1;
     }
-    struct IntNode *nroot = gdt_get_page(&tree->bank, nr_page);
+    void *nlpage_ptr = gdt_get_page(&tree->bank, nlpage);
 
-    memcpy(nroot->entries[0].key, pkey, MAX_KEY);
-    nroot->head_page = lpage;
-    nroot->entries[0].cpage = rpage;
-    nroot->header.nkeys = 1;
+    memcpy(nlpage_ptr, root_page_ptr, PAGE_SIZE);
+    lpage = nlpage;
+
+    if (root_header->type == BNODE_INT) {
+        struct IntNode *nlnode = nlpage_ptr;
+        struct NodeHeader *ch = gdt_get_page(&tree->bank, nlnode->head_page);
+        ch->parent_page = nlpage;
+        for (u8 i = 0; i < nlnode->header.nkeys; i++) {
+            ch = gdt_get_page(&tree->bank, nlnode->entries[i].cpage);
+            ch->parent_page = nlpage;
+        }
+    }
+
+    root_header->type = BNODE_INT;
+    root_header->nkeys = 1;
+    root_header->parent_page = INVALID_PAGE;
+    root_header->next_page = INVALID_PAGE;
+    root_header->prev_page = INVALID_PAGE;
+
+    struct IntNode *root = (struct IntNode *) root_header;
+    memcpy(root->entries[0].key, pkey, MAX_KEY);
+    root->head_page = lpage;
+    root->entries[0].cpage = rpage;
 
     struct NodeHeader *lh = gdt_get_page(&tree->bank, lpage);
     struct NodeHeader *rh = gdt_get_page(&tree->bank, rpage);
-    lh->parent_page = nr_page;
-    rh->parent_page = nr_page;
+    lh->parent_page = tree->root_page;
+    rh->parent_page = tree->root_page;
 
-    sb = gdt_get_superblock(&tree->bank);
-    sb->root_page = nr_page;
     return 0;
 }
 
@@ -390,11 +409,9 @@ static i32 merge_leaf(struct BTree *tree, u32 page, u8 *skey_out, u32 *dpage_out
 static i32 merge_node(struct BTree *tree, u32 page, u8 *skey_out, u32 *dpage_out);
 
 i32 btree_delete(struct BTree *tree, const u8 *key) {
-    struct GdtSuperblock *sb = gdt_get_superblock(&tree->bank);
-
     u32 parent_stack[32]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
-    u32 page_num = btree_find_leaf(tree, sb->root_page, key, parent_stack, &stack_top);
+    u32 page_num = btree_find_leaf(tree, tree->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
         return -1;
     }
@@ -446,17 +463,23 @@ i32 btree_delete(struct BTree *tree, const u8 *key) {
         memcpy(skey, new_skey, MAX_KEY);
     }
     u32 root_page = parent_stack[0];
-    struct IntNode *root_node = gdt_get_page(&tree->bank, root_page);
+    void *root_page_ptr = gdt_get_page(&tree->bank, root_page);
+    struct NodeHeader *root_header = root_page_ptr;
     delete_internal_entry(tree, root_page, skey, dpage);
-    if (!root_node->header.nkeys) {
-        u32 nr_page = root_node->head_page;
-        struct NodeHeader *nroot = gdt_get_page(&tree->bank, nr_page);
-        nroot->parent_page = INVALID_PAGE;
-
-        struct GdtSuperblock *sb = gdt_get_superblock(&tree->bank);
-        sb->root_page = nr_page;
-
-        gdt_unset_page(&tree->bank, root_page);
+    if (!root_header->nkeys) {
+        u32 nr_page = ((struct IntNode *) root_page_ptr)->head_page;
+        void *nr_page_ptr = gdt_get_page(&tree->bank, nr_page);
+        memcpy(root_page_ptr, nr_page_ptr, PAGE_SIZE);
+        if (root_header->type == BNODE_INT) {
+            struct IntNode *root = root_page_ptr;
+            struct NodeHeader *ch = gdt_get_page(&tree->bank, root->head_page);
+            ch->parent_page = root_page;
+            for (u8 i = 0; i < root->header.nkeys; i++) {
+                ch = gdt_get_page(&tree->bank, root->entries[i].cpage);
+                ch->parent_page = root_page;
+            }
+        }
+        gdt_unset_page(&tree->bank, nr_page);
     }
     return 0;
 }

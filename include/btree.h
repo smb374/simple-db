@@ -80,7 +80,10 @@ _Static_assert(sizeof(struct IntNode) == PAGE_SIZE, "IntNode should be PAGE_SIZE
 
 struct BTree {
     struct GdtPageBank bank;
+    u32 root_page;
 };
+
+u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint);
 
 int btree_create(struct BTree *tree, i32 fd);
 int btree_open(struct BTree *tree, const char *path);

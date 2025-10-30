@@ -11,9 +11,11 @@
 #define MAX_GDTS 64
 #define GROUP_BITMAPS 2
 #define GROUP_SIZE 65536
-#define HEAD_OFFSET (1 + MAX_GDTS)
+#define SCHEMA_PAGE 1
+#define GDT_START 2
+#define HEAD_OFFSET (GDT_START + MAX_GDTS) // 1 for SB, 1 for schema, 1 for index catalog
 #define MASKS_PER_PAGE (PAGE_SIZE / 4) // 1 page has PAGE_SIZE / 4 32-bit masks
-#define INITIAL_PAGES (1 + MAX_GDTS + GROUP_SIZE)
+#define INITIAL_PAGES (HEAD_OFFSET + GROUP_SIZE)
 #define INVALID_PAGE ((u32) - 1)
 
 struct GdtPageBank {
@@ -30,7 +32,7 @@ struct GdtSuperblock {
     u32 gdt_pages; // Number of GDTs, should be MAX_GDTS
     u32 total_pages; // Total pages in file
     u32 total_groups; // Total groups in file
-    u32 root_page;
+    u32 _root_page;
     u32 curr_dblk; // Cache current DATA_NORMAL block page number.
     u32 head_dblk; // Head of the DATA_NORMAL block list by page number.
     u8 _pad[PAGE_SIZE - 36];
@@ -52,7 +54,7 @@ static inline struct GdtSuperblock *gdt_get_superblock(struct GdtPageBank *b) {
 }
 
 static inline struct GroupDescriptor *get_gdt(struct GdtPageBank *b) {
-    return (struct GroupDescriptor *) ((u8 *) b->pages + PAGE_SIZE);
+    return (struct GroupDescriptor *) ((u8 *) b->pages + GDT_START * PAGE_SIZE);
 }
 
 static inline bool gdt_is_page_set(struct GdtPageBank *b, const u32 page) {
