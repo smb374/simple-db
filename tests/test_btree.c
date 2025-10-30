@@ -9,6 +9,7 @@
 #include "unity.h"
 
 static struct BTree tree;
+static struct BTreeHandle handle;
 
 static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
 
@@ -99,6 +100,8 @@ void setUp(void) {
     // 5. Reset dblock list state
     tree.bank.curr_dblk = sb->curr_dblk = INVALID_PAGE;
     sb->head_dblk = INVALID_PAGE;
+
+    btree_make_handle(&tree, &handle);
 }
 
 void tearDown(void) {
@@ -111,12 +114,12 @@ void test_insert_and_search_single_key(void) {
     const char *val = "test_value";
     u32 len = strlen(val) + 1;
 
-    i32 ret = btree_insert(&tree, key, val, len);
+    i32 ret = btree_insert(&handle, key, val, len);
     TEST_ASSERT_EQUAL(0, ret);
 
     char read_buf[64];
     u32 read_len;
-    ret = btree_search(&tree, key, read_buf, &read_len);
+    ret = btree_search(&handle, key, read_buf, &read_len);
 
     TEST_ASSERT_EQUAL(0, ret);
     TEST_ASSERT_EQUAL(len, read_len);
@@ -128,8 +131,7 @@ void test_search_non_existent_key(void) {
     make_key(key, "non_existent");
     char read_buf[64];
     u32 read_len;
-
-    i32 ret = btree_search(&tree, key, read_buf, &read_len);
+    i32 ret = btree_search(&handle, key, read_buf, &read_len);
     TEST_ASSERT_EQUAL(-1, ret);
 }
 
@@ -142,16 +144,16 @@ void test_update_existing_key(void) {
     u32 len2 = strlen(val2) + 1;
 
     // Insert initial value
-    i32 ret = btree_insert(&tree, key, val1, len1);
+    i32 ret = btree_insert(&handle, key, val1, len1);
     TEST_ASSERT_EQUAL(0, ret);
 
     // Update with new value
-    ret = btree_insert(&tree, key, val2, len2);
+    ret = btree_insert(&handle, key, val2, len2);
     TEST_ASSERT_EQUAL(0, ret);
 
     char read_buf[64];
     u32 read_len;
-    ret = btree_search(&tree, key, read_buf, &read_len);
+    ret = btree_search(&handle, key, read_buf, &read_len);
 
     TEST_ASSERT_EQUAL(0, ret);
     TEST_ASSERT_EQUAL(len2, read_len);
@@ -169,10 +171,10 @@ void test_insertion_causes_leaf_split(void) {
         make_key(key, key_str);
 
         sprintf(val, "val_%02d", i);
-        i32 ret = btree_insert(&tree, key, val, strlen(val) + 1);
+        i32 ret = btree_insert(&handle, key, val, strlen(val) + 1);
         TEST_ASSERT_EQUAL(0, ret);
 
-        struct NodeHeader *root_header = gdt_get_page(&tree.bank, tree.root_page);
+        struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
         if (root_header->type == BNODE_LEAF) {
             TEST_ASSERT_EQUAL_HEX32(INVALID_PAGE, root_header->next_page);
         }
@@ -190,13 +192,13 @@ void test_insertion_causes_leaf_split(void) {
         make_key(key, key_str);
         sprintf(val, "val_%02d", i);
 
-        i32 ret = btree_search(&tree, key, read_buf, &read_len);
+        i32 ret = btree_search(&handle, key, read_buf, &read_len);
         TEST_ASSERT_EQUAL(0, ret);
         TEST_ASSERT_EQUAL_STRING(val, read_buf);
     }
 
     // Check that root is now an internal node
-    struct NodeHeader *root_header = gdt_get_page(&tree.bank, tree.root_page);
+    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 
@@ -208,24 +210,24 @@ void test_delete_simple(void) {
     const char *val = "value";
     u32 len = strlen(val) + 1;
 
-    btree_insert(&tree, key1, val, len);
-    btree_insert(&tree, key2, val, len);
-    btree_insert(&tree, key3, val, len);
+    btree_insert(&handle, key1, val, len);
+    btree_insert(&handle, key2, val, len);
+    btree_insert(&handle, key3, val, len);
 
     // Delete key2
-    i32 ret = btree_delete(&tree, key2);
+    i32 ret = btree_delete(&handle, key2);
     TEST_ASSERT_EQUAL(0, ret);
 
     // Verify key2 is gone
     char read_buf[16];
     u32 read_len;
-    ret = btree_search(&tree, key2, read_buf, &read_len);
+    ret = btree_search(&handle, key2, read_buf, &read_len);
     TEST_ASSERT_EQUAL(-1, ret);
 
     // Verify key1 and key3 are still there
-    ret = btree_search(&tree, key1, read_buf, &read_len);
+    ret = btree_search(&handle, key1, read_buf, &read_len);
     TEST_ASSERT_EQUAL(0, ret);
-    ret = btree_search(&tree, key3, read_buf, &read_len);
+    ret = btree_search(&handle, key3, read_buf, &read_len);
     TEST_ASSERT_EQUAL(0, ret);
 }
 
@@ -241,13 +243,13 @@ void test_delete_cause_redistribute(void) {
         sprintf(key_str, "key_%02d", i);
         make_key(key, key_str);
         sprintf(val, "val_%02d", i);
-        btree_insert(&tree, key, val, strlen(val) + 1);
+        btree_insert(&handle, key, val, strlen(val) + 1);
     }
 
     // Delete a key from the left leaf to make it underfull.
     u8 key_to_delete[MAX_KEY];
     make_key(key_to_delete, "key_05");
-    i32 ret = btree_delete(&tree, key_to_delete);
+    i32 ret = btree_delete(&handle, key_to_delete);
     TEST_ASSERT_EQUAL(0, ret);
 
     // Verification:
@@ -255,30 +257,30 @@ void test_delete_cause_redistribute(void) {
     // The parent separator key should have been updated from "key_15" to "key_16".
 
     // 1. Check the deleted key is gone.
-    ret = btree_search(&tree, key_to_delete, NULL, NULL);
+    ret = btree_search(&handle, key_to_delete, NULL, NULL);
     TEST_ASSERT_EQUAL(-1, ret);
 
     // 2. Check a key that was NOT moved.
     u8 unoved_key[MAX_KEY];
     make_key(unoved_key, "key_03");
-    ret = btree_search(&tree, unoved_key, NULL, NULL);
+    ret = btree_search(&handle, unoved_key, NULL, NULL);
     TEST_ASSERT_EQUAL(0, ret);
 
     // 3. Check that the borrowed key ("key_15") is now findable via search
     //    (it will be in the left leaf now).
     u8 borrowed_key[MAX_KEY];
     make_key(borrowed_key, "key_15");
-    ret = btree_search(&tree, borrowed_key, NULL, NULL);
+    ret = btree_search(&handle, borrowed_key, NULL, NULL);
     TEST_ASSERT_EQUAL(0, ret);
 
     // 4. Check that a key from the right leaf is still there.
     u8 rleaf_key[MAX_KEY];
     make_key(rleaf_key, "key_20");
-    ret = btree_search(&tree, rleaf_key, NULL, NULL);
+    ret = btree_search(&handle, rleaf_key, NULL, NULL);
     TEST_ASSERT_EQUAL(0, ret);
 
     // 5. Check the parent (root) separator key is now "key_16"
-    struct IntNode *root = gdt_get_page(&tree.bank, tree.root_page);
+    struct IntNode *root = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root->header.type);
     TEST_ASSERT_EQUAL(1, root->header.nkeys);
     u8 new_sep_key[MAX_KEY];
@@ -297,13 +299,13 @@ void test_delete_cause_merge_and_root_shrink(void) {
         sprintf(key_str, "key_%02d", i);
         make_key(key, key_str);
         sprintf(val, "val_%02d", i);
-        btree_insert(&tree, key, val, strlen(val) + 1);
+        btree_insert(&handle, key, val, strlen(val) + 1);
     }
 
     // 2. Delete one from the right leaf to bring it to 15 keys.
     u8 key_to_trim[MAX_KEY];
     make_key(key_to_trim, "key_30");
-    btree_delete(&tree, key_to_trim);
+    btree_delete(&handle, key_to_trim);
 
     // At this point, both leaves have 15 keys (MIN_NODE_ENTS).
     // The root is an internal node with one separator key ("key_15").
@@ -312,31 +314,31 @@ void test_delete_cause_merge_and_root_shrink(void) {
     //    It cannot redistribute, so it must merge with the right leaf.
     u8 key_to_delete[MAX_KEY];
     make_key(key_to_delete, "key_00");
-    i32 ret = btree_delete(&tree, key_to_delete);
+    i32 ret = btree_delete(&handle, key_to_delete);
     TEST_ASSERT_EQUAL(0, ret);
 
     // Verification:
     // 1. The root should now be a LEAF node again (tree height shrunk).
-    struct NodeHeader *root_header = gdt_get_page(&tree.bank, tree.root_page);
+    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_LEAF, root_header->type);
 
     // 2. The new root leaf should have 14 + 15 = 29 keys.
     TEST_ASSERT_EQUAL(29, root_header->nkeys);
 
     // 3. Check that the deleted key is gone.
-    ret = btree_search(&tree, key_to_delete, NULL, NULL);
+    ret = btree_search(&handle, key_to_delete, NULL, NULL);
     TEST_ASSERT_EQUAL(-1, ret);
 
     // 4. Check that a key from the original left leaf is still there.
     u8 l_key[MAX_KEY];
     make_key(l_key, "key_01");
-    ret = btree_search(&tree, l_key, NULL, NULL);
+    ret = btree_search(&handle, l_key, NULL, NULL);
     TEST_ASSERT_EQUAL(0, ret);
 
     // 5. Check that a key from the original right leaf is still there.
     u8 r_key[MAX_KEY];
     make_key(r_key, "key_20");
-    ret = btree_search(&tree, r_key, NULL, NULL);
+    ret = btree_search(&handle, r_key, NULL, NULL);
     TEST_ASSERT_EQUAL(0, ret);
 }
 
@@ -345,9 +347,9 @@ void test_value_storage_types(void) {
     u8 key1[MAX_KEY];
     make_key(key1, "inline_key");
     char inline_val[50] = "This is an inline value";
-    btree_insert(&tree, key1, inline_val, strlen(inline_val) + 1);
+    btree_insert(&handle, key1, inline_val, strlen(inline_val) + 1);
 
-    struct LeafNode *root = gdt_get_page(&tree.bank, tree.root_page);
+    struct LeafNode *root = gdt_get_page(handle.bank, handle.root_page);
 
     bool exact_match = false;
     u8 slot = leaf_find_slot(root, key1, &exact_match);
@@ -361,9 +363,9 @@ void test_value_storage_types(void) {
     char normal_val[100];
     memset(normal_val, 'A', 99);
     normal_val[99] = '\0';
-    btree_insert(&tree, key2, normal_val, 100);
+    btree_insert(&handle, key2, normal_val, 100);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key2, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -375,9 +377,9 @@ void test_value_storage_types(void) {
     char huge_val[5000];
     memset(huge_val, 'B', 4999);
     huge_val[4999] = '\0';
-    btree_insert(&tree, key3, huge_val, 5000);
+    btree_insert(&handle, key3, huge_val, 5000);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key3, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -387,13 +389,13 @@ void test_value_storage_types(void) {
     char read_buf[5000];
     u32 read_len;
 
-    btree_search(&tree, key1, read_buf, &read_len);
+    btree_search(&handle, key1, read_buf, &read_len);
     TEST_ASSERT_EQUAL_STRING(inline_val, read_buf);
 
-    btree_search(&tree, key2, read_buf, &read_len);
+    btree_search(&handle, key2, read_buf, &read_len);
     TEST_ASSERT_EQUAL_MEMORY(normal_val, read_buf, 100);
 
-    btree_search(&tree, key3, read_buf, &read_len);
+    btree_search(&handle, key3, read_buf, &read_len);
     TEST_ASSERT_EQUAL_MEMORY(huge_val, read_buf, 5000);
 }
 
@@ -408,9 +410,9 @@ void test_value_size_boundaries(void) {
     // Test at boundary: exactly 63 bytes (should be inline)
     make_key(key, "bound_00_63b");
     memset(val, 'X', 63);
-    btree_insert(&tree, key, val, 63);
+    btree_insert(&handle, key, val, 63);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -419,9 +421,9 @@ void test_value_size_boundaries(void) {
     // Test at boundary: 64 bytes (should be normal)
     make_key(key, "bound_01_64b");
     memset(val, 'Y', 64);
-    btree_insert(&tree, key, val, 64);
+    btree_insert(&handle, key, val, 64);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -430,9 +432,9 @@ void test_value_size_boundaries(void) {
     // Test at boundary: 4000 bytes (should be normal)
     make_key(key, "bound_02_4kb");
     memset(val, 'Z', 4000);
-    btree_insert(&tree, key, val, 4000);
+    btree_insert(&handle, key, val, 4000);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -441,9 +443,9 @@ void test_value_size_boundaries(void) {
     // Test at boundary: 4001 bytes (should be huge)
     make_key(key, "bound_03_4kb");
     memset(val, 'W', 4001);
-    btree_insert(&tree, key, val, 4001);
+    btree_insert(&handle, key, val, 4001);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -453,7 +455,7 @@ void test_value_size_boundaries(void) {
     make_key(key, "bound_00_63b");
     char read_buf[5000];
     u32 read_len;
-    TEST_ASSERT_EQUAL(0, btree_search(&tree, key, read_buf, &read_len));
+    TEST_ASSERT_EQUAL(0, btree_search(&handle, key, read_buf, &read_len));
     TEST_ASSERT_EQUAL(63, read_len);
 }
 
@@ -467,9 +469,9 @@ void test_update_changes_value_type(void) {
 
     // Start with inline value
     char small_val[20] = "small";
-    btree_insert(&tree, key, small_val, strlen(small_val) + 1);
+    btree_insert(&handle, key, small_val, strlen(small_val) + 1);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -479,9 +481,9 @@ void test_update_changes_value_type(void) {
     char medium_val[100];
     memset(medium_val, 'M', 99);
     medium_val[99] = '\0';
-    btree_insert(&tree, key, medium_val, 100);
+    btree_insert(&handle, key, medium_val, 100);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -491,9 +493,9 @@ void test_update_changes_value_type(void) {
     char large_val[5000];
     memset(large_val, 'L', 4999);
     large_val[4999] = '\0';
-    btree_insert(&tree, key, large_val, 5000);
+    btree_insert(&handle, key, large_val, 5000);
 
-    root = gdt_get_page(&tree.bank, tree.root_page);
+    root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
@@ -502,7 +504,7 @@ void test_update_changes_value_type(void) {
     // Verify final value
     char read_buf[5000];
     u32 read_len;
-    btree_search(&tree, key, read_buf, &read_len);
+    btree_search(&handle, key, read_buf, &read_len);
     TEST_ASSERT_EQUAL_MEMORY(large_val, read_buf, 5000);
 }
 
@@ -518,7 +520,7 @@ void test_internal_node_split(void) {
 
         char val[16];
         sprintf(val, "v_%04d", i);
-        btree_insert(&tree, key, val, strlen(val) + 1);
+        btree_insert(&handle, key, val, strlen(val) + 1);
     }
 
     // Verify all keys are searchable
@@ -530,7 +532,7 @@ void test_internal_node_split(void) {
 
         char read_buf[16];
         u32 read_len;
-        i32 ret = btree_search(&tree, key, read_buf, &read_len);
+        i32 ret = btree_search(&handle, key, read_buf, &read_len);
         TEST_ASSERT_EQUAL(0, ret);
 
         char expected_val[16];
@@ -539,7 +541,7 @@ void test_internal_node_split(void) {
     }
 
     // Root should be internal node with height > 1
-    struct NodeHeader *root_header = gdt_get_page(&tree.bank, tree.root_page);
+    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 
@@ -553,7 +555,7 @@ void test_delete_internal_node_merge(void) {
 
         char val[16];
         sprintf(val, "v_%04d", i);
-        btree_insert(&tree, key, val, strlen(val) + 1);
+        btree_insert(&handle, key, val, strlen(val) + 1);
     }
 
     // Delete many keys to trigger internal node merges
@@ -563,7 +565,7 @@ void test_delete_internal_node_merge(void) {
         sprintf(key_str, "k_%04d", i);
         make_key(key, key_str);
 
-        i32 ret = btree_delete(&tree, key);
+        i32 ret = btree_delete(&handle, key);
         TEST_ASSERT_EQUAL(0, ret);
     }
 
@@ -576,7 +578,7 @@ void test_delete_internal_node_merge(void) {
 
         char read_buf[16];
         u32 read_len;
-        i32 ret = btree_search(&tree, key, read_buf, &read_len);
+        i32 ret = btree_search(&handle, key, read_buf, &read_len);
         TEST_ASSERT_EQUAL(0, ret);
 
         char expected_val[16];
@@ -591,7 +593,7 @@ void test_delete_internal_node_merge(void) {
         sprintf(key_str, "k_%04d", i);
         make_key(key, key_str);
 
-        i32 ret = btree_search(&tree, key, NULL, NULL);
+        i32 ret = btree_search(&handle, key, NULL, NULL);
         TEST_ASSERT_EQUAL(-1, ret);
     }
 }
@@ -612,7 +614,7 @@ void test_random_operations(void) {
 
         char val[16];
         sprintf(val, "v_%04d", idx);
-        btree_insert(&tree, key, val, strlen(val) + 1);
+        btree_insert(&handle, key, val, strlen(val) + 1);
         inserted[idx] = 1;
     }
 
@@ -624,7 +626,7 @@ void test_random_operations(void) {
             sprintf(key_str, "k_%04d", i);
             make_key(key, key_str);
 
-            i32 ret = btree_search(&tree, key, NULL, NULL);
+            i32 ret = btree_search(&handle, key, NULL, NULL);
             TEST_ASSERT_EQUAL(0, ret);
         }
     }
@@ -638,7 +640,7 @@ void test_random_operations(void) {
             sprintf(key_str, "k_%04d", idx);
             make_key(key, key_str);
 
-            btree_delete(&tree, key);
+            btree_delete(&handle, key);
             inserted[idx] = 0;
         }
     }
@@ -650,7 +652,7 @@ void test_random_operations(void) {
         sprintf(key_str, "k_%04d", i);
         make_key(key, key_str);
 
-        i32 ret = btree_search(&tree, key, NULL, NULL);
+        i32 ret = btree_search(&handle, key, NULL, NULL);
         if (inserted[i]) {
             TEST_ASSERT_EQUAL(0, ret);
         } else {
@@ -664,11 +666,11 @@ void test_empty_tree_operations(void) {
     make_key(key, "test");
 
     // Search in empty tree
-    i32 ret = btree_search(&tree, key, NULL, NULL);
+    i32 ret = btree_search(&handle, key, NULL, NULL);
     TEST_ASSERT_EQUAL(-1, ret);
 
     // Delete from empty tree
-    ret = btree_delete(&tree, key);
+    ret = btree_delete(&handle, key);
     TEST_ASSERT_EQUAL(-1, ret);
 }
 
@@ -677,8 +679,10 @@ void test_file_persistence(void) {
 
     // Create and populate tree
     struct BTree tree1;
+    struct BTreeHandle handle1;
     int fd = open(test_file, O_RDWR | O_CREAT | O_TRUNC, 0644);
     btree_create(&tree1, fd);
+    btree_make_handle(&tree, &handle1);
 
     for (int i = 0; i < 100; i++) {
         u8 key[MAX_KEY];
@@ -688,14 +692,16 @@ void test_file_persistence(void) {
 
         char val[16];
         sprintf(val, "v_%03d", i);
-        btree_insert(&tree1, key, val, strlen(val) + 1);
+        btree_insert(&handle1, key, val, strlen(val) + 1);
     }
 
     btree_close(&tree1);
 
     // Reopen and verify
     struct BTree tree2;
+    struct BTreeHandle handle2;
     btree_open(&tree2, test_file);
+    btree_make_handle(&tree, &handle2);
 
     for (int i = 0; i < 100; i++) {
         u8 key[MAX_KEY];
@@ -705,7 +711,7 @@ void test_file_persistence(void) {
 
         char read_buf[16];
         u32 read_len;
-        i32 ret = btree_search(&tree2, key, read_buf, &read_len);
+        i32 ret = btree_search(&handle2, key, read_buf, &read_len);
         TEST_ASSERT_EQUAL(0, ret);
 
         char expected_val[16];

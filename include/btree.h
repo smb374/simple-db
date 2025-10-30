@@ -83,14 +83,21 @@ struct BTree {
     u32 root_page;
 };
 
+struct BTreeHandle {
+    struct GdtPageBank *bank;
+    u32 root_page;
+};
+
 u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint);
 
-int btree_create(struct BTree *tree, i32 fd);
-int btree_open(struct BTree *tree, const char *path);
+// Legacy API for 1 tree per bank, currently used in test.
+i32 btree_create(struct BTree *tree, i32 fd);
+i32 btree_open(struct BTree *tree, const char *path);
 void btree_close(struct BTree *tree);
-
-i32 btree_search(struct BTree *tree, const u8 *key, void *value_out, u32 *len_out);
-i32 btree_insert(struct BTree *tree, const u8 *key, const void *val, u32 len);
-i32 btree_delete(struct BTree *tree, const u8 *key);
+void btree_make_handle(struct BTree *tree, struct BTreeHandle *h);
+// Handle Based API
+i32 btree_search(struct BTreeHandle *tree, const u8 *key, void *value_out, u32 *len_out);
+i32 btree_insert(struct BTreeHandle *tree, const u8 *key, const void *val, u32 len);
+i32 btree_delete(struct BTreeHandle *tree, const u8 *key);
 
 #endif /* ifndef BTREE_H */

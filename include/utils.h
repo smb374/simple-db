@@ -16,4 +16,6 @@ typedef int64_t i64;
 #define MIN(x, y) ((y) ^ (((x) ^ (y)) & -((x) < (y))))
 #define MAX(x, y) ((x) ^ (((x) ^ (y)) & -((x) < (y))))
 
+#define MAX_NAME 64
+
 #endif /* ifndef UTILS_H */
