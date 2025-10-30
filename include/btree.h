@@ -3,7 +3,7 @@
 
 // Short-hand sized integers defined here
 #include "dblock.h"
-#include "page.h"
+#include "gdt_page.h"
 #include "utils.h"
 
 #define MAX_KEY 64
@@ -79,7 +79,7 @@ _Static_assert(sizeof(struct IntNode) == PAGE_SIZE, "IntNode should be PAGE_SIZE
 #define IS_FULL(node) (NODE_NKEYS(node) >= MAX_NODE_ENTS)
 
 struct BTree {
-    struct PageBank bank;
+    struct GdtPageBank bank;
 };
 
 int btree_create(struct BTree *tree, i32 fd);

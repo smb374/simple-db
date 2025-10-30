@@ -5,25 +5,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "page.h"
+#include "gdt_page.h"
 #include "utils.h"
 
-static u32 alloc_hdblk(struct PageBank *b) {
-    u32 page_num = alloc_page(b);
+static u32 alloc_hdblk(struct GdtPageBank *b, u32 hint) {
+    u32 page_num = gdt_alloc_page(b, hint);
     if (page_num == INVALID_PAGE)
         return INVALID_PAGE;
-    struct DataBlockHuge *blk = get_page(b, page_num);
+    struct DataBlockHuge *blk = gdt_get_page(b, page_num);
     blk->meta.block_type = DATA_HUGE;
     blk->meta.next_page = INVALID_PAGE;
 
     return page_num;
 }
 
-static u32 alloc_ndblk(struct PageBank *b) {
-    u32 page_num = alloc_page(b);
+static u32 alloc_ndblk(struct GdtPageBank *b, u32 hint) {
+    u32 page_num = gdt_alloc_page(b, hint);
     if (page_num == INVALID_PAGE)
         return INVALID_PAGE;
-    struct DataBlockNormal *blk = get_page(b, page_num);
+    struct DataBlockNormal *blk = gdt_get_page(b, page_num);
     blk->meta.block_type = DATA_NORMAL;
     blk->num_slots = 0;
     blk->cell_off = PAGE_SIZE;
@@ -31,10 +31,10 @@ static u32 alloc_ndblk(struct PageBank *b) {
     blk->meta.next_page = INVALID_PAGE;
     blk->prev_page = INVALID_PAGE;
 
-    struct Superblock *sb = get_superblock(b);
+    struct GdtSuperblock *sb = gdt_get_superblock(b);
     blk->meta.next_page = sb->head_dblk;
     if (sb->head_dblk != INVALID_PAGE) {
-        struct DataBlockNormal *ohead = get_page(b, sb->head_dblk);
+        struct DataBlockNormal *ohead = gdt_get_page(b, sb->head_dblk);
         ohead->prev_page = page_num;
     }
     sb->head_dblk = page_num;
@@ -75,14 +75,14 @@ static void ndblk_defrag(struct DataBlockNormal *blk) {
     }
 }
 
-struct VPtr write_huge_data(struct PageBank *b, void *data, u32 len) {
+struct VPtr write_huge_data(struct GdtPageBank *b, const void *data, u32 len) {
     // Create array to hold page numbers for pre-allocation
     u32 npage = len / DATA_HUGE_SPACE + (len % DATA_HUGE_SPACE != 0);
     u32 *pages = calloc(npage, sizeof(u32));
     // Alloc all required pages, reject when failed.
     u32 top;
     for (top = 0; top < npage; top++) {
-        pages[top] = alloc_hdblk(b);
+        pages[top] = alloc_hdblk(b, !top ? INVALID_PAGE : pages[0]);
         if (pages[top] == INVALID_PAGE) {
             goto CLEANUP;
         }
@@ -90,7 +90,7 @@ struct VPtr write_huge_data(struct PageBank *b, void *data, u32 len) {
     // Write data to pages.
     u32 off = 0, left = len;
     for (u32 i = 0; i < npage; i++) {
-        struct DataBlockHuge *blk = get_page(b, pages[i]);
+        struct DataBlockHuge *blk = gdt_get_page(b, pages[i]);
         blk->meta.next_page = i < npage - 1 ? pages[i + 1] : INVALID_PAGE;
 
         u32 size = MIN(left, DATA_HUGE_SPACE);
@@ -105,18 +105,18 @@ struct VPtr write_huge_data(struct PageBank *b, void *data, u32 len) {
 
 CLEANUP:
     for (u32 i = 0; i < top; i++) {
-        unset_page(b, pages[i]);
+        gdt_unset_page(b, pages[i]);
     }
     free(pages);
     return VPTR_INVALID;
 }
 
-i32 read_huge_data(struct PageBank *b, void *data, struct VPtr ptr) {
+i32 read_huge_data(struct GdtPageBank *b, void *data, struct VPtr ptr) {
     u32 curr = ptr.page;
     u32 left = VPTR_GET_HUGE_LEN(ptr);
     u32 off = 0;
     while (left) {
-        struct DataBlockHuge *blk = get_page(b, curr);
+        struct DataBlockHuge *blk = gdt_get_page(b, curr);
         u32 size = MIN(left, DATA_HUGE_SPACE);
 
         memcpy((u8 *) data + off, blk->data, size);
@@ -132,38 +132,38 @@ i32 read_huge_data(struct PageBank *b, void *data, struct VPtr ptr) {
     return 0;
 }
 
-void delete_huge_data(struct PageBank *b, struct VPtr ptr) {
+void delete_huge_data(struct GdtPageBank *b, struct VPtr ptr) {
     u32 curr = ptr.page;
     while (curr != INVALID_PAGE) {
-        struct DataBlockHuge *blk = get_page(b, curr);
+        struct DataBlockHuge *blk = gdt_get_page(b, curr);
         u32 next = blk->meta.next_page;
-        unset_page(b, curr);
+        gdt_unset_page(b, curr);
         curr = next;
     }
 }
 
-struct VPtr write_normal_data(struct PageBank *b, void *data, const u16 len) {
+struct VPtr write_normal_data(struct GdtPageBank *b, u32 hint, const void *data, const u16 len) {
     u32 page_num = b->curr_dblk;
     if (page_num == INVALID_PAGE) {
-        page_num = alloc_ndblk(b);
+        page_num = alloc_ndblk(b, hint);
         if (page_num == INVALID_PAGE) {
             return VPTR_INVALID;
         }
         b->curr_dblk = page_num;
     }
 
-    struct DataBlockNormal *blk = get_page(b, page_num);
+    struct DataBlockNormal *blk = gdt_get_page(b, page_num);
     if (blk->frag_bytes > PAGE_SIZE / 4) {
         ndblk_defrag(blk);
     }
 
     if (!ndblk_has_space(blk, len)) {
-        struct Superblock *sb = get_superblock(b);
+        struct GdtSuperblock *sb = gdt_get_superblock(b);
         u32 curr = sb->head_dblk;
         i32 cnt = 0;
 
         while (curr != INVALID_PAGE && cnt < 8) {
-            blk = get_page(b, curr);
+            blk = gdt_get_page(b, curr);
 
             if (blk->frag_bytes > PAGE_SIZE / 4) {
                 ndblk_defrag(blk);
@@ -180,12 +180,12 @@ struct VPtr write_normal_data(struct PageBank *b, void *data, const u16 len) {
         }
 
         if (!ndblk_has_space(blk, len)) {
-            page_num = alloc_ndblk(b);
+            page_num = alloc_ndblk(b, curr);
             if (page_num == INVALID_PAGE) {
                 return VPTR_INVALID;
             }
             b->curr_dblk = page_num;
-            blk = get_page(b, page_num);
+            blk = gdt_get_page(b, page_num);
         }
     }
 
@@ -211,11 +211,11 @@ struct VPtr write_normal_data(struct PageBank *b, void *data, const u16 len) {
     return VPTR_MAKE_NORMAL(page_num, slot_idx, len);
 }
 
-i32 read_normal_data(struct PageBank *b, void *data, struct VPtr ptr) {
+i32 read_normal_data(struct GdtPageBank *b, void *data, struct VPtr ptr) {
     u32 page_num = ptr.page;
     u16 slot_idx = VPTR_GET_SLOT(ptr);
 
-    struct DataBlockNormal *blk = get_page(b, page_num);
+    struct DataBlockNormal *blk = gdt_get_page(b, page_num);
     if (slot_idx >= blk->num_slots || !blk->slots[slot_idx]) {
         return -1;
     }
@@ -225,11 +225,11 @@ i32 read_normal_data(struct PageBank *b, void *data, struct VPtr ptr) {
     return 0;
 }
 
-void delete_normal_data(struct PageBank *b, struct VPtr ptr) {
+void delete_normal_data(struct GdtPageBank *b, struct VPtr ptr) {
     u32 page_num = ptr.page;
     u16 slot_idx = VPTR_GET_SLOT(ptr);
 
-    struct DataBlockNormal *blk = get_page(b, page_num);
+    struct DataBlockNormal *blk = gdt_get_page(b, page_num);
     if (slot_idx >= blk->num_slots || !blk->slots[slot_idx]) {
         return;
     }
