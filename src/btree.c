@@ -3,12 +3,16 @@
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
 #include "dblock.h"
 #include "gdt_page.h"
 #include "utils.h"
+
+#define MAX_HEIGHT 32
+#define TXN_PAGE_MASK 0x80000000
 
 static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
 
@@ -220,7 +224,7 @@ void btree_make_handle(struct BTree *tree, struct BTreeHandle *h) {
 }
 
 i32 btree_search(struct BTreeHandle *handle, const u8 *key, void *value_out, u32 *len_out) {
-    u32 parent_stack[32]; // Stack to track path (max height ~32)
+    u32 parent_stack[MAX_HEIGHT]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
     u32 page_num = btree_find_leaf(handle, handle->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
@@ -236,11 +240,169 @@ i32 btree_search(struct BTreeHandle *handle, const u8 *key, void *value_out, u32
     return read_leafval(handle, &leaf->entries[slot].val, value_out, len_out);
 }
 
+// Transaction
+struct BTreeTxn {
+    struct BTreeHandle *handle;
+    void *page_stack;
+    u32 *tlb;
+    u16 tlb_size;
+    u16 height;
+    u16 new_page_cnt;
+    u16 new_pages[MAX_HEIGHT + 2];
+};
+
+static void *txn_get_page(struct BTreeTxn *txn, u32 txn_page_num) {
+    if (txn_page_num == INVALID_PAGE || !(txn_page_num & TXN_PAGE_MASK)) {
+        return NULL;
+    }
+
+    u16 idx = txn_page_num & ~TXN_PAGE_MASK;
+    if (idx >= txn->tlb_size) {
+        return NULL;
+    }
+
+    return (u8 *) txn->page_stack + idx * PAGE_SIZE;
+}
+
+// Only insert will use it.
+static u32 txn_alloc_node(struct BTreeTxn *txn, u32 base_idx, u8 type) {
+    if (base_idx >= txn->tlb_size || (base_idx & 1)) {
+        return INVALID_PAGE;
+    }
+    u16 idx = base_idx + 1;
+    void *page = (u8 *) txn->page_stack + idx * PAGE_SIZE;
+    memset(page, 0, PAGE_SIZE);
+    struct NodeHeader *header = page;
+    header->type = type;
+    header->nkeys = 0;
+    header->next_page = INVALID_PAGE;
+    header->prev_page = INVALID_PAGE;
+    header->parent_page = INVALID_PAGE;
+
+
+    return (idx | TXN_PAGE_MASK);
+}
+
+static u32 txn_translate(struct BTreeTxn *txn, u32 txn_page_num) {
+    if (txn_page_num == INVALID_PAGE || !(txn_page_num & TXN_PAGE_MASK)) {
+        return INVALID_PAGE;
+    }
+
+    u16 idx = txn_page_num & ~TXN_PAGE_MASK;
+    if (idx >= txn->tlb_size) {
+        return INVALID_PAGE;
+    }
+
+    return txn->tlb[idx];
+}
+
+static i32 txn_pull_real_page(struct BTreeTxn *txn, u32 txn_page_num, u16 base_idx) {
+    if (txn_page_num == INVALID_PAGE || !(txn_page_num & TXN_PAGE_MASK)) {
+        return -1;
+    }
+
+    u16 idx = txn_page_num & ~TXN_PAGE_MASK;
+    if (idx >= txn->tlb_size || idx <= base_idx) {
+        return INVALID_PAGE;
+    }
+
+    u32 real_page = gdt_alloc_page(txn->handle->bank, txn->tlb[base_idx]);
+    if (real_page == INVALID_PAGE) {
+        return -1;
+    }
+    txn->new_pages[txn->new_page_cnt++] = real_page;
+    txn->tlb[idx] = real_page;
+    return 0;
+}
+
 // Insert
 static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, const struct LeafVal *val, u8 *pkey_out,
                       u32 *npage_out);
 static i32 split_internal(struct BTreeHandle *handle, u32 ipage, const u8 *key, u32 rpage, u8 *pkey_out,
                           u32 *npage_out);
+static i32 split_leaf_txn(struct BTreeTxn *txn, const u8 *key, const struct LeafVal *val, u8 *pkey_out, u32 *npage_out);
+static i32 split_internal_txn(struct BTreeTxn *txn, u32 ipage, const u8 *key, u32 rpage, u8 *pkey_out, u32 *npage_out);
+
+#define INSERT_TXN_LEAF_SIDX MAX_HEIGHT
+#define INSERT_TXN_NROOT_SIDX (MAX_HEIGHT + 1)
+#define INSERT_TXN_LEAF_IDX (MAX_HEIGHT * 2)
+#define INSERT_TXN_NROOT_IDX ((MAX_HEIGHT + 1) * 2)
+#define SIDX_TO_TXN_PAGE(sidx) (((sidx) * 2) | TXN_PAGE_MASK)
+
+static i32 btree_insert_txn(struct BTreeTxn *txn, const u8 slot, const u8 *key, const struct LeafVal *val) {
+    struct LeafNode *leaf = txn_get_page(txn, SIDX_TO_TXN_PAGE(INSERT_TXN_LEAF_SIDX));
+
+    if (leaf->header.nkeys < MAX_NODE_ENTS) {
+        // Insert into leaf (shift entries to make space)
+        memmove(&leaf->entries[slot + 1], &leaf->entries[slot], (leaf->header.nkeys - slot) * sizeof(struct LeafEnt));
+        memcpy(leaf->entries[slot].key, key, MAX_KEY);
+        memcpy(&leaf->entries[slot].val, &val, sizeof(struct LeafVal));
+        leaf->header.nkeys++;
+        return 0;
+    }
+
+    u8 pkey[MAX_KEY];
+    u32 new_page;
+
+    if (split_leaf_txn(txn, key, val, pkey, &new_page) < 0) {
+        return -1;
+    }
+
+    u32 lpage = SIDX_TO_TXN_PAGE(INSERT_TXN_LEAF_SIDX), rpage = new_page;
+    u16 stack_top = txn->height;
+    while (stack_top) {
+        u32 ppage = SIDX_TO_TXN_PAGE(--stack_top);
+        struct IntNode *pnode = txn_get_page(txn, ppage);
+        if (pnode->header.nkeys < MAX_NODE_ENTS) {
+            u8 cidx = internal_find_child(pnode, pkey, NULL);
+            memmove(&pnode->entries[cidx + 1], &pnode->entries[cidx],
+                    (pnode->header.nkeys - cidx) * sizeof(struct IntEnt));
+            memcpy(pnode->entries[cidx].key, pkey, MAX_KEY);
+            pnode->entries[cidx].cpage = rpage;
+            struct NodeHeader *rh = txn_get_page(txn, rpage);
+            rh->parent_page = ppage;
+            pnode->header.nkeys++;
+            return 0;
+        }
+
+        u8 new_pkey[MAX_KEY];
+
+        if (split_internal_txn(txn, ppage, pkey, rpage, new_pkey, &new_page) < 0) {
+            return -1;
+        }
+
+        memcpy(pkey, new_pkey, MAX_KEY);
+        lpage = ppage;
+        rpage = new_page;
+    }
+    assert(lpage == SIDX_TO_TXN_PAGE(0));
+    void *root_page_ptr = txn_get_page(txn, SIDX_TO_TXN_PAGE(0));
+    struct NodeHeader *root_header = root_page_ptr;
+
+    u32 nlpage = txn_alloc_node(txn, INSERT_TXN_NROOT_IDX, root_header->type);
+    void *nlpage_ptr = txn_get_page(txn, nlpage);
+
+    memcpy(nlpage_ptr, root_page_ptr, PAGE_SIZE);
+    lpage = nlpage;
+
+    root_header->type = BNODE_INT;
+    root_header->nkeys = 1;
+    root_header->parent_page = INVALID_PAGE;
+    root_header->next_page = INVALID_PAGE;
+    root_header->prev_page = INVALID_PAGE;
+
+    struct IntNode *root = (struct IntNode *) root_header;
+    memcpy(root->entries[0].key, pkey, MAX_KEY);
+    root->head_page = lpage;
+    root->entries[0].cpage = rpage;
+
+    struct NodeHeader *lh = txn_get_page(txn, lpage);
+    struct NodeHeader *rh = txn_get_page(txn, rpage);
+    lh->parent_page = SIDX_TO_TXN_PAGE(0);
+    rh->parent_page = SIDX_TO_TXN_PAGE(0);
+
+    return 0;
+}
 
 // key should be put in a MAX_KEY buf before passing in.
 i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32 len) {
@@ -249,7 +411,7 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
         return -1;
     }
 
-    u32 parent_stack[32]; // Stack to track path (max height ~32)
+    u32 parent_stack[MAX_HEIGHT]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
     u32 page_num = btree_find_leaf(handle, handle->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
@@ -271,6 +433,27 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
 
         return 0;
     }
+    // Copy stack to the Txn, with leaf added at stack top
+    // Each copied page is at idx of height * 2
+    // So split page can just use idx + 1
+    // Special stack height: MAX_HEIGHT -> leaf, MAX_HEIGHT + 1 -> new root
+    // leaf split will be at TLB[MAX_HEIGHT * 2 + 1]
+    struct BTreeTxn txn;
+    txn.page_stack = calloc((MAX_HEIGHT + 2) * 2, PAGE_SIZE);
+    txn.tlb = calloc((MAX_HEIGHT + 2) * 2, sizeof(u32));
+    txn.tlb_size = (MAX_HEIGHT + 2) * 2;
+    // Initialize TLB with INVALID_PAGE
+    memset(txn.tlb, 0xFF, ((MAX_HEIGHT + 2) * 2) * sizeof(u32));
+    txn.height = stack_top;
+    u16 idx = 0;
+    for (u16 i = 0; i < stack_top; i++) {
+        void *node_ptr = gdt_get_page(handle->bank, parent_stack[i]);
+        memcpy((u8 *) txn.page_stack + idx * PAGE_SIZE, node_ptr, PAGE_SIZE);
+        txn.tlb[idx] = parent_stack[i];
+        idx += 2;
+    }
+    memcpy((u8 *) txn.page_stack + MAX_HEIGHT * 2 * PAGE_SIZE, leaf, PAGE_SIZE);
+    txn.tlb[MAX_HEIGHT * 2] = page_num;
 
     if (leaf->header.nkeys < MAX_NODE_ENTS) {
         // Insert into leaf (shift entries to make space)
@@ -400,6 +583,43 @@ static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, cons
     return 0;
 }
 
+static i32 split_leaf_txn(struct BTreeTxn *txn, const u8 *key, const struct LeafVal *val, u8 *pkey_out,
+                          u32 *npage_out) {
+    struct LeafEnt tmp[MAX_NODE_ENTS + 1];
+
+    struct LeafNode *lleaf = txn_get_page(txn, SIDX_TO_TXN_PAGE(INSERT_TXN_LEAF_SIDX));
+    u8 slot = leaf_find_slot(lleaf, key, NULL);
+
+    memcpy(tmp, lleaf->entries, slot * sizeof(struct LeafEnt));
+    memcpy(&tmp[slot].key, key, MAX_KEY);
+    memcpy(&tmp[slot].val, val, sizeof(struct LeafVal));
+    if (MAX_NODE_ENTS - slot) {
+        memcpy(&tmp[slot + 1], &lleaf->entries[slot], (MAX_NODE_ENTS - slot) * sizeof(struct LeafEnt));
+    }
+
+    u32 txn_rpage = txn_alloc_node(txn, INSERT_TXN_LEAF_IDX, BNODE_LEAF);
+    if (txn_rpage == INVALID_PAGE) {
+        return -1;
+    }
+    *npage_out = txn_rpage;
+    struct LeafNode *rleaf = txn_get_page(txn, txn_rpage);
+
+    u8 mid = (MAX_NODE_ENTS + 1) / 2;
+
+    memcpy(lleaf->entries, tmp, mid * sizeof(struct LeafEnt));
+    memcpy(rleaf->entries, &tmp[mid], (MAX_NODE_ENTS + 1 - mid) * sizeof(struct LeafEnt));
+
+    lleaf->header.nkeys = mid;
+    rleaf->header.nkeys = MAX_NODE_ENTS + 1 - mid;
+    rleaf->header.next_page = lleaf->header.next_page;
+    // No need to update here sibling here, do it in txn commit stage.
+    rleaf->header.prev_page = SIDX_TO_TXN_PAGE(INSERT_TXN_LEAF_SIDX);
+    lleaf->header.next_page = txn_rpage;
+
+    memcpy(pkey_out, rleaf->entries[0].key, MAX_KEY);
+    return 0;
+}
+
 static i32 split_internal(struct BTreeHandle *handle, u32 ipage, const u8 *key, u32 rpage, u8 *pkey_out,
                           u32 *npage_out) {
     struct IntEnt tmp[MAX_NODE_ENTS + 1];
@@ -448,6 +668,41 @@ static i32 split_internal(struct BTreeHandle *handle, u32 ipage, const u8 *key, 
     return 0;
 }
 
+static i32 split_internal_txn(struct BTreeTxn *txn, u32 ipage, const u8 *key, u32 rpage, u8 *pkey_out, u32 *npage_out) {
+    struct IntEnt tmp[MAX_NODE_ENTS + 1];
+
+    struct IntNode *inode = txn_get_page(txn, ipage);
+    u8 slot = internal_find_child(inode, key, NULL);
+
+    memcpy(tmp, inode->entries, slot * sizeof(struct IntEnt));
+    memcpy(&tmp[slot].key, key, MAX_KEY);
+    tmp[slot].cpage = rpage;
+    memcpy(&tmp[slot + 1], &inode->entries[slot], (MAX_NODE_ENTS - slot) * sizeof(struct IntEnt));
+
+    u32 txn_npage = txn_alloc_node(txn, ipage | ~TXN_PAGE_MASK, BNODE_INT);
+    if (txn_npage == INVALID_PAGE) {
+        return -1;
+    }
+    *npage_out = txn_npage;
+    struct IntNode *nnode = txn_get_page(txn, txn_npage);
+
+    u8 mid = (MAX_NODE_ENTS + 1) / 2;
+    memcpy(pkey_out, tmp[mid].key, MAX_KEY); // This key is promoted.
+
+    memcpy(inode->entries, tmp, mid * sizeof(struct IntEnt));
+    inode->header.nkeys = mid;
+
+    nnode->head_page = tmp[mid].cpage;
+    memcpy(nnode->entries, &tmp[mid + 1], (MAX_NODE_ENTS - mid) * sizeof(struct IntEnt));
+
+    nnode->header.nkeys = MAX_NODE_ENTS - mid;
+    nnode->header.next_page = inode->header.next_page;
+    nnode->header.prev_page = ipage;
+    inode->header.next_page = txn_npage;
+
+    return 0;
+}
+
 static bool delete_internal_entry(struct BTreeHandle *handle, u32 page, const u8 *key, u32 dpage);
 static i32 redistribute_leaf(struct BTreeHandle *handle, u32 page);
 static i32 redistribute_internal(struct BTreeHandle *handle, u32 page);
@@ -455,7 +710,7 @@ static i32 merge_leaf(struct BTreeHandle *handle, u32 page, u8 *skey_out, u32 *d
 static i32 merge_node(struct BTreeHandle *handle, u32 page, u8 *skey_out, u32 *dpage_out);
 
 i32 btree_delete(struct BTreeHandle *handle, const u8 *key) {
-    u32 parent_stack[32]; // Stack to track path (max height ~32)
+    u32 parent_stack[MAX_HEIGHT]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
     u32 page_num = btree_find_leaf(handle, handle->root_page, key, parent_stack, &stack_top);
     if (page_num == INVALID_PAGE) {
