@@ -354,8 +354,8 @@ void test_value_storage_types(void) {
     bool exact_match = false;
     u8 slot = leaf_find_slot(root, key1, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val_type);
-    TEST_ASSERT_EQUAL(strlen(inline_val) + 1, root->entries[slot].ival.len);
+    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(strlen(inline_val) + 1, root->entries[slot].val.ival.len);
 
     // Test normal value (64-4000 bytes)
     u8 key2[MAX_KEY];
@@ -369,7 +369,7 @@ void test_value_storage_types(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key2, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
 
     // Test huge value (>4000 bytes)
     u8 key3[MAX_KEY];
@@ -383,7 +383,7 @@ void test_value_storage_types(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key3, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
 
     // Verify all values can be read back correctly
     char read_buf[5000];
@@ -416,7 +416,7 @@ void test_value_size_boundaries(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
 
     // Test at boundary: 64 bytes (should be normal)
     make_key(key, "bound_01_64b");
@@ -427,7 +427,7 @@ void test_value_size_boundaries(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
 
     // Test at boundary: 4000 bytes (should be normal)
     make_key(key, "bound_02_4kb");
@@ -438,7 +438,7 @@ void test_value_size_boundaries(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
 
     // Test at boundary: 4001 bytes (should be huge)
     make_key(key, "bound_03_4kb");
@@ -449,7 +449,7 @@ void test_value_size_boundaries(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
 
     // Verify all can be read back
     make_key(key, "bound_00_63b");
@@ -475,7 +475,7 @@ void test_update_changes_value_type(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
 
     // Update to normal value
     char medium_val[100];
@@ -487,7 +487,7 @@ void test_update_changes_value_type(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
 
     // Update to huge value
     char large_val[5000];
@@ -499,7 +499,7 @@ void test_update_changes_value_type(void) {
     exact_match = false;
     slot = leaf_find_slot(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
 
     // Verify final value
     char read_buf[5000];

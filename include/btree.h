@@ -16,8 +16,7 @@ enum {
     BNODE_LEAF = 1,
 };
 
-struct LeafEnt {
-    u8 key[MAX_KEY];
+struct LeafVal {
     u8 val_type;
     u8 _pad[3];
     union {
@@ -27,6 +26,11 @@ struct LeafEnt {
         } ival;
         struct VPtr ptr;
     };
+};
+
+struct LeafEnt {
+    u8 key[MAX_KEY];
+    struct LeafVal val;
 };
 typedef struct LeafEnt LeafEnt;
 

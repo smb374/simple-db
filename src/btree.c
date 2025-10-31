@@ -43,66 +43,66 @@ static u8 internal_find_child(struct IntNode *node, const u8 *key, bool *exact_m
     return binary_search((const u8 *) node->entries, node->header.nkeys, key, sizeof(struct IntEnt), exact_match);
 }
 
-static i32 read_entry_value(struct BTreeHandle *tree, struct LeafEnt *entry, void *value_out, u32 *len_out) {
+static i32 read_leafval(struct BTreeHandle *handle, struct LeafVal *val, void *value_out, u32 *len_out) {
     i32 ret;
     u8 len;
-    switch (entry->val_type) {
+    switch (val->val_type) {
         case DATA_INLINE:
-            len = entry->ival.len;
+            len = val->ival.len;
             if (len_out)
                 *len_out = len;
             if (value_out)
-                memcpy(value_out, entry->ival.data, len);
+                memcpy(value_out, val->ival.data, len);
             break;
         case DATA_NORMAL:
-            ret = read_normal_data(tree->bank, value_out, entry->ptr);
+            ret = read_normal_data(handle->bank, value_out, val->ptr);
             if (ret < 0)
                 return -1;
             if (len_out)
-                *len_out = VPTR_GET_LEN(entry->ptr);
+                *len_out = VPTR_GET_LEN(val->ptr);
             break;
         default:
-            ret = read_huge_data(tree->bank, value_out, entry->ptr);
+            ret = read_huge_data(handle->bank, value_out, val->ptr);
             if (ret < 0)
                 return -1;
             if (len_out)
-                *len_out = VPTR_GET_HUGE_LEN(entry->ptr);
+                *len_out = VPTR_GET_HUGE_LEN(val->ptr);
             break;
     }
     return 0;
 }
 
-static i32 write_entry_value(struct BTreeHandle *tree, u32 hint, struct LeafEnt *entry, const void *value, u32 len) {
+static i32 write_leafval(struct BTreeHandle *handle, struct LeafVal *lval, const void *val, const u32 len) {
     if (len <= MAX_INLINE) {
-        entry->val_type = DATA_INLINE;
-        entry->ival.len = len;
-        memcpy(entry->ival.data, value, len);
-        return 0;
+        lval->val_type = DATA_INLINE;
+        lval->ival.len = len;
+        memcpy(lval->ival.data, val, len);
     } else if (len <= MAX_NORMAL) {
-        entry->val_type = DATA_NORMAL;
-        entry->ptr = write_normal_data(tree->bank, hint, value, len);
-        if (entry->ptr.page == INVALID_PAGE)
+        lval->val_type = DATA_NORMAL;
+        lval->ptr = write_normal_data(handle->bank, INVALID_PAGE, val, len);
+        if (lval->ptr.page == INVALID_PAGE) {
             return -1;
-        return 0;
+        }
     } else {
-        entry->val_type = DATA_HUGE;
-        entry->ptr = write_huge_data(tree->bank, value, len);
-        if (entry->ptr.page == INVALID_PAGE)
+        lval->val_type = DATA_HUGE;
+        lval->ptr = write_huge_data(handle->bank, val, len);
+        if (lval->ptr.page == INVALID_PAGE) {
             return -1;
-        return 0;
+        }
     }
+    return 0;
 }
 
-static void delete_entry_value(struct BTreeHandle *tree, struct LeafEnt *entry) {
-    switch (entry->val_type) {
+static void delete_leafval(struct BTreeHandle *handle, struct LeafVal *val) {
+    switch (val->val_type) {
         case DATA_INLINE:
-            memset(&entry->ival, 0, MAX_INLINE + 1);
+            memset(&val->ival, 0, MAX_INLINE + 1);
             break;
         case DATA_NORMAL:
-            delete_normal_data(tree->bank, entry->ptr);
+            delete_normal_data(handle->bank, val->ptr);
             break;
         default:
-            delete_huge_data(tree->bank, entry->ptr);
+            delete_huge_data(handle->bank, val->ptr);
             break;
     }
 }
@@ -233,17 +233,22 @@ i32 btree_search(struct BTreeHandle *handle, const u8 *key, void *value_out, u32
     if (slot >= leaf->header.nkeys || !exact_match) {
         return -1; // Key not found
     }
-    return read_entry_value(handle, &leaf->entries[slot], value_out, len_out);
+    return read_leafval(handle, &leaf->entries[slot].val, value_out, len_out);
 }
 
 // Insert
-static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, const void *val, u32 len, u8 *pkey_out,
+static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, const struct LeafVal *val, u8 *pkey_out,
                       u32 *npage_out);
 static i32 split_internal(struct BTreeHandle *handle, u32 ipage, const u8 *key, u32 rpage, u8 *pkey_out,
                           u32 *npage_out);
 
 // key should be put in a MAX_KEY buf before passing in.
 i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32 len) {
+    struct LeafVal lval;
+    if (write_leafval(handle, &lval, val, len) < 0) {
+        return -1;
+    }
+
     u32 parent_stack[32]; // Stack to track path (max height ~32)
     u16 stack_top = 0;
     u32 page_num = btree_find_leaf(handle, handle->root_page, key, parent_stack, &stack_top);
@@ -257,17 +262,21 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
 
     if (slot < leaf->header.nkeys && exact_match) {
         // Key exists - update value
-        delete_entry_value(handle, &leaf->entries[slot]);
-        return write_entry_value(handle, page_num, &leaf->entries[slot], val, len);
+        struct LeafVal oval;
+        memcpy(&oval, &leaf->entries[slot].val, sizeof(struct LeafVal));
+
+        memcpy(&leaf->entries[slot].val, &lval, sizeof(struct LeafVal));
+
+        delete_leafval(handle, &oval);
+
+        return 0;
     }
 
     if (leaf->header.nkeys < MAX_NODE_ENTS) {
         // Insert into leaf (shift entries to make space)
         memmove(&leaf->entries[slot + 1], &leaf->entries[slot], (leaf->header.nkeys - slot) * sizeof(struct LeafEnt));
         memcpy(leaf->entries[slot].key, key, MAX_KEY);
-        i32 ret = write_entry_value(handle, page_num, &leaf->entries[slot], val, len);
-        if (ret < 0)
-            return ret;
+        memcpy(&leaf->entries[slot].val, &lval, sizeof(struct LeafVal));
 
         leaf->header.nkeys++;
         return 0;
@@ -276,7 +285,7 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
     u8 pkey[MAX_KEY];
     u32 new_page;
 
-    if (split_leaf(handle, page_num, key, val, len, pkey, &new_page) < 0) {
+    if (split_leaf(handle, page_num, key, &lval, pkey, &new_page) < 0) {
         return -1;
     }
 
@@ -349,8 +358,8 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
     return 0;
 }
 
-static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, const void *val, const u32 len,
-                      u8 *pkey_out, u32 *npage_out) {
+static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, const struct LeafVal *val, u8 *pkey_out,
+                      u32 *npage_out) {
     struct LeafEnt tmp[MAX_NODE_ENTS + 1];
 
     struct LeafNode *lleaf = gdt_get_page(handle->bank, lpage);
@@ -358,9 +367,7 @@ static i32 split_leaf(struct BTreeHandle *handle, u32 lpage, const u8 *key, cons
 
     memcpy(tmp, lleaf->entries, slot * sizeof(struct LeafEnt));
     memcpy(&tmp[slot].key, key, MAX_KEY);
-    if (write_entry_value(handle, lpage, &tmp[slot], val, len) < 0) {
-        return -1;
-    }
+    memcpy(&tmp[slot].val, val, sizeof(struct LeafVal));
     if (MAX_NODE_ENTS - slot) {
         memcpy(&tmp[slot + 1], &lleaf->entries[slot], (MAX_NODE_ENTS - slot) * sizeof(struct LeafEnt));
     }
@@ -463,7 +470,7 @@ i32 btree_delete(struct BTreeHandle *handle, const u8 *key) {
         return -1;
     }
 
-    delete_entry_value(handle, &leaf->entries[slot]);
+    delete_leafval(handle, &leaf->entries[slot].val);
     if (slot < leaf->header.nkeys) {
         memmove(&leaf->entries[slot], &leaf->entries[slot + 1],
                 (leaf->header.nkeys - slot - 1) * sizeof(struct LeafEnt));
