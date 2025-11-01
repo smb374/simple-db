@@ -6,4 +6,4 @@ db_srcs = [
   './gdt_page.c',
   './schema.c',
 ]
-db_lib = library('simple-db-lib', db_srcs, include_directories : inc)
+db_lib = static_library('simple-db-lib', db_srcs, include_directories : inc)

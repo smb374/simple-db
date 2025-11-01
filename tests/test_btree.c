@@ -515,7 +515,7 @@ void test_internal_node_split(void) {
     for (int i = 0; i < 1000; i++) {
         u8 key[MAX_KEY];
         char key_str[16];
-        sprintf(key_str, "k_%04d", i);
+        sprintf(key_str, "k_%08d", i);
         make_key(key, key_str);
 
         char val[16];
@@ -527,7 +527,7 @@ void test_internal_node_split(void) {
     for (int i = 0; i < 1000; i++) {
         u8 key[MAX_KEY];
         char key_str[16];
-        sprintf(key_str, "k_%04d", i);
+        sprintf(key_str, "k_%08d", i);
         make_key(key, key_str);
 
         char read_buf[16];

@@ -13,6 +13,12 @@
 
 #include "utils.h"
 
+void gdt_sync(struct GdtPageBank *b) {
+    if (b->fd != -1) {
+        msync(b->pages, b->size, MS_SYNC);
+    }
+}
+
 void *gdt_get_page(struct GdtPageBank *b, u32 page_num) {
     if (page_num * PAGE_SIZE >= b->size)
         return NULL;
