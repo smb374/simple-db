@@ -680,7 +680,7 @@ static i32 split_leaf_txn(struct BTreeTxn *txn, const u8 *key, const struct Leaf
     memcpy(&tmp[slot].val, val, sizeof(struct LeafVal));
 
     if (MAX_TN_ENTS - slot) {
-        for (u8 i = slot; i < MAX_TN_ENTS; i++) {
+        for (u32 i = slot; i < MAX_TN_ENTS; i++) {
             memcpy(&tmp[i + 1], TN_GET_LENT(lleaf, i), sizeof(struct LeafEnt));
         }
     }
@@ -704,7 +704,7 @@ static i32 split_leaf_txn(struct BTreeTxn *txn, const u8 *key, const struct Leaf
         struct LeafEnt *ent = TN_GET_LENT(lleaf, i);
         memcpy(ent, &tmp[i], sizeof(struct LeafEnt));
     }
-    for (u8 i = mid; i < MAX_TN_ENTS + 1; i++) {
+    for (u32 i = mid; i < MAX_TN_ENTS + 1; i++) {
         rleaf->ent_off -= sizeof(struct LeafEnt);
         rleaf->slots[i - mid] = rleaf->ent_off;
         struct LeafEnt *ent = TN_GET_LENT(rleaf, i - mid);
@@ -733,7 +733,7 @@ static i32 split_internal_txn(struct BTreeTxn *txn, u32 ipage, const u8 *key, u3
     tmp[slot].cpage = rpage;
 
     if (MAX_TN_ENTS - slot) {
-        for (u8 i = slot; i < MAX_TN_ENTS; i++) {
+        for (u32 i = slot; i < MAX_TN_ENTS; i++) {
             memcpy(&tmp[i + 1], TN_GET_IENT(inode, i), sizeof(struct IntEnt));
         }
     }
@@ -758,7 +758,7 @@ static i32 split_internal_txn(struct BTreeTxn *txn, u32 ipage, const u8 *key, u3
         memcpy(ent, &tmp[i], sizeof(struct IntEnt));
     }
     nnode->head_page = tmp[mid].cpage;
-    for (u8 i = mid + 1; i < MAX_TN_ENTS + 1; i++) {
+    for (u32 i = mid + 1; i < MAX_TN_ENTS + 1; i++) {
         nnode->ent_off -= sizeof(struct IntEnt);
         nnode->slots[i - mid - 1] = nnode->ent_off;
         struct IntEnt *ent = TN_GET_IENT(nnode, i - mid - 1);
