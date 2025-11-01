@@ -60,29 +60,6 @@ static void defrag_tree_node(struct TreeNode *node) {
     }
 }
 
-static u8 leaf_alloc_entry(struct TreeNode *node, const u8 *key, bool *exact_match) {
-    assert(node->type == BNODE_LEAF);
-    if (node->frag_bytes >= MAX_LEAF_FRAG) {
-        defrag_tree_node(node);
-    }
-
-    const u8 slot = slotted_binary_search(node, key, exact_match);
-    if (*exact_match) {
-        return slot;
-    }
-    if (slot == MAX_TN_ENTS) {
-        return MAX_TN_ENTS;
-    }
-
-    if (node->nkeys - slot) {
-        memmove(&node->slots[slot + 1], &node->slots[slot], (node->nkeys - slot) * sizeof(u16));
-    }
-    node->nkeys++;
-    node->ent_off -= sizeof(struct LeafEnt);
-    node->slots[slot] = node->ent_off;
-    return slot;
-}
-
 static struct LeafEnt *leaf_free_entry(struct TreeNode *node, const u8 *key) {
     assert(node->type == BNODE_LEAF);
     if (node->frag_bytes >= MAX_LEAF_FRAG) {
@@ -406,14 +383,13 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
 
     struct TreeNode *leaf = gdt_get_page(handle->bank, page_num);
     bool exact_match = false;
-    u8 slot = leaf_alloc_entry(leaf, key, &exact_match);
-    if (slot < leaf->nkeys && exact_match) {
+    u8 slot = slotted_binary_search(leaf, key, &exact_match);
+    if (exact_match && slot < leaf->nkeys) {
         // Key exists - update value
         struct LeafVal oval;
         memcpy(&oval, &TN_GET_LENT(leaf, slot)->val, sizeof(struct LeafVal));
         memcpy(&TN_GET_LENT(leaf, slot)->val, &lval, sizeof(struct LeafVal));
         delete_leafval(handle, &oval);
-
         return 0;
     }
     // Copy stack to the Txn, with leaf added at stack top
@@ -455,6 +431,7 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
         }
         free(txn.page_stack);
         free(txn.tlb);
+        return -1;
     }
 
     free(txn.page_stack);
@@ -494,6 +471,14 @@ static i32 btree_insert_txn(struct BTreeTxn *txn, const u8 slot, const u8 *key, 
 
     if (leaf->nkeys < MAX_TN_ENTS) {
         // Insert into leaf (shift entries to make space)
+        if (leaf->nkeys - slot > 0) {
+            memmove(&leaf->slots[slot + 1], &leaf->slots[slot], (leaf->nkeys - slot) * sizeof(u16));
+        }
+        leaf->ent_off -= sizeof(struct LeafEnt);
+        leaf->slots[slot] = leaf->ent_off;
+        leaf->nkeys++;
+
+        // Now copy the data
         memcpy(TN_GET_LENT(leaf, slot)->key, key, MAX_KEY);
         memcpy(&TN_GET_LENT(leaf, slot)->val, val, sizeof(struct LeafVal));
         return 0;
@@ -518,7 +503,6 @@ static i32 btree_insert_txn(struct BTreeTxn *txn, const u8 slot, const u8 *key, 
             TN_GET_IENT(pnode, cidx)->cpage = rpage;
             struct TreeNode *rh = txn_get_page(txn, rpage);
             rh->parent_page = ppage;
-            pnode->nkeys++;
             return 0;
         }
 
@@ -776,8 +760,8 @@ static i32 split_internal_txn(struct BTreeTxn *txn, u32 ipage, const u8 *key, u3
     nnode->head_page = tmp[mid].cpage;
     for (u8 i = mid + 1; i < MAX_TN_ENTS + 1; i++) {
         nnode->ent_off -= sizeof(struct IntEnt);
-        nnode->slots[i - mid] = nnode->ent_off;
-        struct IntEnt *ent = TN_GET_IENT(nnode, i - mid);
+        nnode->slots[i - mid - 1] = nnode->ent_off;
+        struct IntEnt *ent = TN_GET_IENT(nnode, i - mid - 1);
         memcpy(ent, &tmp[i], sizeof(struct IntEnt));
     }
 
@@ -865,20 +849,47 @@ i32 btree_delete(struct BTreeHandle *handle, const u8 *key) {
     }
     return 0;
 }
-
 static bool delete_internal_entry(struct BTreeHandle *handle, u32 page, const u8 *key, const u32 dpage) {
     struct TreeNode *node = gdt_get_page(handle->bank, page);
     bool exact_match = false;
     u8 cidx = slotted_binary_search(node, key, &exact_match);
+
     if (exact_match) {
+        // The key exists in the entries array
         assert(TN_GET_IENT(node, cidx)->cpage == dpage);
-        memmove(&node->slots[cidx], &node->slots[cidx + 1], (node->nkeys - cidx - 1) * sizeof(u16));
+        // Remove this slot
+        if (node->nkeys - cidx - 1 > 0) {
+            memmove(&node->slots[cidx], &node->slots[cidx + 1], (node->nkeys - cidx - 1) * sizeof(u16));
+        }
+        node->nkeys--;
+        node->frag_bytes += sizeof(struct IntEnt);
     } else {
-        assert(cidx > 0);
-        memmove(&node->slots[cidx - 1], &node->slots[cidx], (node->nkeys - cidx) * sizeof(u16));
+        // The key would be before entries[cidx], so the deleted page must be head_page or entries[cidx-1]
+        if (cidx == 0) {
+            // The deleted page is head_page, replace it with entries[0].cpage
+            assert(node->head_page == dpage);
+            if (node->nkeys > 0) {
+                node->head_page = TN_GET_IENT(node, 0)->cpage;
+                // Remove entries[0]
+                if (node->nkeys > 1) {
+                    memmove(&node->slots[0], &node->slots[1], (node->nkeys - 1) * sizeof(u16));
+                }
+                node->nkeys--;
+                node->frag_bytes += sizeof(struct IntEnt);
+            }
+        } else {
+            // The deleted page is entries[cidx-1].cpage
+            assert(cidx > 0);
+            assert(TN_GET_IENT(node, cidx - 1)->cpage == dpage);
+            // Remove slot at cidx-1
+            if (node->nkeys - cidx > 0) {
+                memmove(&node->slots[cidx - 1], &node->slots[cidx], (node->nkeys - cidx) * sizeof(u16));
+            }
+            node->nkeys--;
+            node->frag_bytes += sizeof(struct IntEnt);
+        }
     }
-    node->nkeys--;
-    node->frag_bytes += sizeof(struct IntEnt);
+
     return node->nkeys >= MIN_TN_ENTS;
 }
 
@@ -923,9 +934,9 @@ static i32 redistribute_leaf(struct BTreeHandle *handle, const u32 page) {
         if (lleaf->parent_page == ppage && lleaf->nkeys > MIN_TN_ENTS) {
             // This is the key that separates lleaf and leaf in the parent
             u8 old_sep[MAX_KEY];
+            memcpy(old_sep, TN_GET_LENT(leaf, 0)->key, MAX_KEY);
             // move lleaf[nkeys] -> leaf[0]
             struct LeafEnt *lent = TN_GET_LENT(lleaf, lleaf->nkeys - 1);
-            memcpy(old_sep, lent->key, MAX_KEY);
             lleaf->nkeys--;
             lleaf->frag_bytes += sizeof(struct LeafEnt);
 
