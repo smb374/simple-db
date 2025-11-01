@@ -103,6 +103,7 @@ static inline void gdt_unset_page(struct GdtPageBank *b, const u32 page) {
     gdt[gidx].free_pages++;
 }
 
+void gdt_sync(struct GdtPageBank *b);
 void *gdt_get_page(struct GdtPageBank *b, u32 page_num);
 i32 gdt_bank_create(struct GdtPageBank *b, i32 fd);
 i32 gdt_bank_open(struct GdtPageBank *b, const char *path);
