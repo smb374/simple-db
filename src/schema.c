@@ -80,7 +80,7 @@ i32 ssb_finalize(struct StaticSchema *s, const struct StaticSchemaBuilder *build
 
     for (u8 i = 0; i < s->num_cols; i++) {
         memcpy(&s->cols[i], &builder->cols[i], sizeof(struct Column));
-        if (s->cols[i].type == KEY_PRIM) {
+        if (s->cols[i].uniq == KEY_PRIM) {
             if (s->prim_col != 0xFF) {
                 return SSB_DUPLICATE_PRIM;
             } else {

@@ -385,6 +385,7 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
         }
         free(txn.page_stack);
         free(txn.tlb);
+        return -1;
     }
 
     free(txn.page_stack);
