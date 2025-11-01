@@ -179,10 +179,7 @@ i32 btree_create_known_root(struct BTreeHandle *handle, struct GdtPageBank *bank
     root->header.prev_page = INVALID_PAGE;
     root->header.next_page = INVALID_PAGE;
 
-    if (bank->fd != -1) {
-        msync(bank->pages, bank->size, MS_SYNC);
-    }
-
+    gdt_sync(handle->bank);
     return 0;
 }
 
@@ -203,10 +200,7 @@ i32 btree_create(struct BTree *tree, i32 fd) {
     root->header.prev_page = INVALID_PAGE;
     root->header.next_page = INVALID_PAGE;
 
-    if (b->fd != -1) {
-        msync(b->pages, b->size, MS_SYNC);
-    }
-
+    gdt_sync(b);
     return 0;
 }
 
