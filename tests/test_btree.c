@@ -13,12 +13,17 @@ static struct BTreeHandle handle;
 
 static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
 
-static u8 binary_search(const u8 *keys, u8 num_keys, const u8 *key, size_t stride, bool *exact_match) {
-    u8 left = 0, right = num_keys;
+static u8 slotted_binary_search(const struct TreeNode *node, const u8 *key, bool *exact_match) {
+    u8 left = 0, right = node->nkeys;
 
     while (left < right) {
         u8 mid = left + (right - left) / 2;
-        const u8 *mid_key = keys + mid * stride;
+        const u8 *mid_key;
+        if (node->type == BNODE_INT) {
+            mid_key = TN_GET_IENT(node, mid)->key;
+        } else {
+            mid_key = TN_GET_LENT(node, mid)->key;
+        }
 
         i32 res = key_cmp(mid_key, key);
         if (res < 0) {
@@ -30,13 +35,7 @@ static u8 binary_search(const u8 *keys, u8 num_keys, const u8 *key, size_t strid
             right = mid;
         }
     }
-
     return left;
-}
-
-// Find slot in leaf node
-static u8 leaf_find_slot(struct LeafNode *leaf, const u8 *key, bool *exact_match) {
-    return binary_search((const u8 *) leaf->entries, leaf->header.nkeys, key, sizeof(struct LeafEnt), exact_match);
 }
 
 // Helper to create a zero-padded, MAX_KEY length key
@@ -90,12 +89,14 @@ void setUp(void) {
     // 4. Reset B-Tree specific state (create a new root node)
     u32 root_page_num = gdt_alloc_page(&tree.bank, INVALID_PAGE);
     tree.root_page = root_page_num;
-    struct LeafNode *root = gdt_get_page(&tree.bank, root_page_num);
-    root->header.type = BNODE_LEAF;
-    root->header.nkeys = 0;
-    root->header.parent_page = INVALID_PAGE;
-    root->header.prev_page = INVALID_PAGE;
-    root->header.next_page = INVALID_PAGE;
+    struct TreeNode *root = gdt_get_page(&tree.bank, root_page_num);
+    root->type = BNODE_LEAF;
+    root->nkeys = 0;
+    root->ent_off = PAGE_SIZE;
+    root->frag_bytes = 0;
+    root->parent_page = INVALID_PAGE;
+    root->prev_page = INVALID_PAGE;
+    root->next_page = INVALID_PAGE;
 
     // 5. Reset dblock list state
     tree.bank.curr_dblk = sb->curr_dblk = INVALID_PAGE;
@@ -174,7 +175,7 @@ void test_insertion_causes_leaf_split(void) {
         i32 ret = btree_insert(&handle, key, val, strlen(val) + 1);
         TEST_ASSERT_EQUAL(0, ret);
 
-        struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
+        struct TreeNode *root_header = gdt_get_page(handle.bank, handle.root_page);
         if (root_header->type == BNODE_LEAF) {
             TEST_ASSERT_EQUAL_HEX32(INVALID_PAGE, root_header->next_page);
         }
@@ -198,7 +199,7 @@ void test_insertion_causes_leaf_split(void) {
     }
 
     // Check that root is now an internal node
-    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
+    struct TreeNode *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 
@@ -280,12 +281,12 @@ void test_delete_cause_redistribute(void) {
     TEST_ASSERT_EQUAL(0, ret);
 
     // 5. Check the parent (root) separator key is now "key_16"
-    struct IntNode *root = gdt_get_page(handle.bank, handle.root_page);
-    TEST_ASSERT_EQUAL(BNODE_INT, root->header.type);
-    TEST_ASSERT_EQUAL(1, root->header.nkeys);
+    struct TreeNode *root = gdt_get_page(handle.bank, handle.root_page);
+    TEST_ASSERT_EQUAL(BNODE_INT, root->type);
+    TEST_ASSERT_EQUAL(1, root->nkeys);
     u8 new_sep_key[MAX_KEY];
     make_key(new_sep_key, "key_16");
-    TEST_ASSERT_EQUAL(0, memcmp(root->entries[0].key, new_sep_key, MAX_KEY));
+    TEST_ASSERT_EQUAL(0, memcmp(TN_GET_IENT(root, 0)->key, new_sep_key, MAX_KEY));
 }
 
 void test_delete_cause_merge_and_root_shrink(void) {
@@ -319,7 +320,7 @@ void test_delete_cause_merge_and_root_shrink(void) {
 
     // Verification:
     // 1. The root should now be a LEAF node again (tree height shrunk).
-    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
+    struct TreeNode *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_LEAF, root_header->type);
 
     // 2. The new root leaf should have 14 + 15 = 29 keys.
@@ -349,13 +350,13 @@ void test_value_storage_types(void) {
     char inline_val[50] = "This is an inline value";
     btree_insert(&handle, key1, inline_val, strlen(inline_val) + 1);
 
-    struct LeafNode *root = gdt_get_page(handle.bank, handle.root_page);
+    struct TreeNode *root = gdt_get_page(handle.bank, handle.root_page);
 
     bool exact_match = false;
-    u8 slot = leaf_find_slot(root, key1, &exact_match);
+    u8 slot = slotted_binary_search(root, key1, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
-    TEST_ASSERT_EQUAL(strlen(inline_val) + 1, root->entries[slot].val.ival.len);
+    TEST_ASSERT_EQUAL(DATA_INLINE, TN_GET_LENT(root, slot)->val.val_type);
+    TEST_ASSERT_EQUAL(strlen(inline_val) + 1, TN_GET_LENT(root, slot)->val.ival.len);
 
     // Test normal value (64-4000 bytes)
     u8 key2[MAX_KEY];
@@ -367,9 +368,9 @@ void test_value_storage_types(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key2, &exact_match);
+    slot = slotted_binary_search(root, key2, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, TN_GET_LENT(root, slot)->val.val_type);
 
     // Test huge value (>4000 bytes)
     u8 key3[MAX_KEY];
@@ -381,9 +382,9 @@ void test_value_storage_types(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key3, &exact_match);
+    slot = slotted_binary_search(root, key3, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, TN_GET_LENT(root, slot)->val.val_type);
 
     // Verify all values can be read back correctly
     char read_buf[5000];
@@ -403,7 +404,7 @@ void test_value_size_boundaries(void) {
     u8 key[MAX_KEY];
     char val[5000];
 
-    struct LeafNode *root;
+    struct TreeNode *root;
     bool exact_match;
     u8 slot;
 
@@ -414,9 +415,9 @@ void test_value_size_boundaries(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_INLINE, TN_GET_LENT(root, slot)->val.val_type);
 
     // Test at boundary: 64 bytes (should be normal)
     make_key(key, "bound_01_64b");
@@ -425,9 +426,9 @@ void test_value_size_boundaries(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, TN_GET_LENT(root, slot)->val.val_type);
 
     // Test at boundary: 4000 bytes (should be normal)
     make_key(key, "bound_02_4kb");
@@ -436,9 +437,9 @@ void test_value_size_boundaries(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, TN_GET_LENT(root, slot)->val.val_type);
 
     // Test at boundary: 4001 bytes (should be huge)
     make_key(key, "bound_03_4kb");
@@ -447,9 +448,9 @@ void test_value_size_boundaries(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, TN_GET_LENT(root, slot)->val.val_type);
 
     // Verify all can be read back
     make_key(key, "bound_00_63b");
@@ -463,7 +464,7 @@ void test_update_changes_value_type(void) {
     u8 key[MAX_KEY];
     make_key(key, "update_test");
 
-    struct LeafNode *root;
+    struct TreeNode *root;
     bool exact_match;
     u8 slot;
 
@@ -473,9 +474,9 @@ void test_update_changes_value_type(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_INLINE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_INLINE, TN_GET_LENT(root, slot)->val.val_type);
 
     // Update to normal value
     char medium_val[100];
@@ -485,9 +486,9 @@ void test_update_changes_value_type(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_NORMAL, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_NORMAL, TN_GET_LENT(root, slot)->val.val_type);
 
     // Update to huge value
     char large_val[5000];
@@ -497,9 +498,9 @@ void test_update_changes_value_type(void) {
 
     root = gdt_get_page(handle.bank, handle.root_page);
     exact_match = false;
-    slot = leaf_find_slot(root, key, &exact_match);
+    slot = slotted_binary_search(root, key, &exact_match);
     TEST_ASSERT_TRUE(exact_match);
-    TEST_ASSERT_EQUAL(DATA_HUGE, root->entries[slot].val.val_type);
+    TEST_ASSERT_EQUAL(DATA_HUGE, TN_GET_LENT(root, slot)->val.val_type);
 
     // Verify final value
     char read_buf[5000];
@@ -541,7 +542,7 @@ void test_internal_node_split(void) {
     }
 
     // Root should be internal node with height > 1
-    struct NodeHeader *root_header = gdt_get_page(handle.bank, handle.root_page);
+    struct TreeNode *root_header = gdt_get_page(handle.bank, handle.root_page);
     TEST_ASSERT_EQUAL(BNODE_INT, root_header->type);
 }
 

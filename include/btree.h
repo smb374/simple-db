@@ -40,47 +40,27 @@ struct IntEnt {
 };
 typedef struct IntEnt IntEnt;
 
-struct NodeHeader {
-    u8 type;
-    u8 nkeys;
-    u16 _pad1;
+struct TreeNode {
+    u8 type; // BNODE_INT or BNODE_LEAF
+    u8 nkeys; // Number of keys, <= MAX_TN_ENTS
+    u16 frag_bytes; // Fragmented bytes
+    u16 ent_off; // entry offset
+    u16 _pad;
+    // Pointers
     u32 parent_page;
     u32 prev_page;
     u32 next_page;
-    u8 _pad2[NODE_HEADER_SIZE - 16]; // Pad header to 64-bytes
+    u32 head_page; // smallest branch in BNODE_INT, unused in BNODE_LEAF
+
+    u16 slots[];
 };
-typedef struct NodeHeader NodeHeader;
-_Static_assert(sizeof(struct NodeHeader) == NODE_HEADER_SIZE, "NoddeHeeader should be NODE_HEADER_SIZE long");
-
-#define MAX_NODE_ENTS ((PAGE_SIZE - NODE_HEADER_SIZE) / sizeof(struct LeafEnt))
-#define MIN_NODE_ENTS (MAX_NODE_ENTS / 2)
-
-// Nodes are all 1 page sized
-#define LEAF_PADDING (PAGE_SIZE - (NODE_HEADER_SIZE + sizeof(struct LeafEnt) * MAX_NODE_ENTS))
-struct LeafNode {
-    struct NodeHeader header;
-    struct LeafEnt entries[MAX_NODE_ENTS];
-    u8 _pad[LEAF_PADDING];
-};
-typedef struct LeafNode LeafNode;
-_Static_assert(sizeof(struct LeafNode) == PAGE_SIZE, "LeafNode should be PAGE_SIZE long");
-
-// We can technically stuff in 2 more internal entries
-// but to keep things simple we just use as much as leaf uses
-#define INT_PADDING (PAGE_SIZE - (NODE_HEADER_SIZE + sizeof(struct IntEnt) * MAX_NODE_ENTS + sizeof(u32)))
-struct IntNode {
-    struct NodeHeader header;
-    u32 head_page;
-    struct IntEnt entries[MAX_NODE_ENTS];
-    u8 _pad[INT_PADDING];
-};
-typedef struct IntNode IntNode;
-_Static_assert(sizeof(struct IntNode) == PAGE_SIZE, "IntNode should be PAGE_SIZE long");
-
-#define NODE_TYPE(node) (((NodeHeader *) (node))->type)
-#define NODE_NKEYS(node) (((NodeHeader *) (node))->nkeys)
-#define IS_LEAF(node) (NODE_TYPE(node) == BNODE_LEAF)
-#define IS_FULL(node) (NODE_NKEYS(node) >= MAX_NODE_ENTS)
+#define MAX_TN_ENTS ((PAGE_SIZE - sizeof(struct TreeNode)) / (2 + sizeof(struct LeafEnt))) // 30
+#define MIN_TN_ENTS (MAX_TN_ENTS / 2) // 15
+#define MAX_LEAF_FRAG (MIN_TN_ENTS * sizeof(struct LeafEnt))
+#define MAX_INT_FRAG (MIN_TN_ENTS * sizeof(struct IntEnt))
+#define TN_GET_ENT(n, s) ((void *) ((u8 *) (n) + (n)->slots[(s)]))
+#define TN_GET_LENT(n, s) ((struct LeafEnt *) ((u8 *) (n) + (n)->slots[(s)]))
+#define TN_GET_IENT(n, s) ((struct IntEnt *) ((u8 *) (n) + (n)->slots[(s)]))
 
 struct BTree {
     struct GdtPageBank bank;
