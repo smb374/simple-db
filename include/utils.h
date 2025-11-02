@@ -18,4 +18,18 @@ typedef int64_t i64;
 
 #define MAX_NAME 64
 
+u16 load16le(const u8 *src);
+u32 load32le(const u8 *src);
+u64 load64le(const u8 *src);
+u16 load16be(const u8 *src);
+u32 load32be(const u8 *src);
+u64 load64be(const u8 *src);
+
+void store16le(u16 val, u8 *dest);
+void store32le(u32 val, u8 *dest);
+void store64le(u64 val, u8 *dest);
+void store16be(u16 val, u8 *dest);
+void store32be(u32 val, u8 *dest);
+void store64be(u64 val, u8 *dest);
+
 #endif /* ifndef UTILS_H */

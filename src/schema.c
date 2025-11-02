@@ -4,6 +4,7 @@
 
 #include "btree.h"
 #include "gdt_page.h"
+#include "type.h"
 #include "utils.h"
 
 i32 ssb_init(struct StaticSchemaBuilder *builder, u8 type) {
@@ -29,16 +30,25 @@ i32 ssb_add_column(struct StaticSchemaBuilder *builder, const char *name, u8 typ
         return SSB_COL_NAME_TOO_LONG;
     }
 
-    // TODO: Add more types & use switch
-    // TODO: Update size based on type
-    if (type != TYPE_BLOB) {
-        return SSB_COL_UNKNOWN_TYPE;
+    switch (type) {
+        case TYPE_INTEGER:
+        case TYPE_REAL:
+            size = 8;
+        case TYPE_BLOB:
+        case TYPE_TEXT:
+            break;
+        default:
+            return SSB_COL_UNKNOWN_TYPE;
     }
 
     switch (uniq) {
         case KEY_NONE:
         case KEY_UNIQ:
+            break;
         case KEY_PRIM:
+            if (size > MAX_KEY) {
+                return SSB_KEY_TOO_LONG;
+            }
             break;
         default:
             return SSB_COL_UNKNOWN_UNIQ;

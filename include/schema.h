@@ -14,10 +14,6 @@ enum {
 };
 
 enum {
-    TYPE_BLOB = 0,
-};
-
-enum {
     KEY_NONE = 0,
     KEY_PRIM = 1,
     KEY_UNIQ = 2,
@@ -61,6 +57,7 @@ enum SSBuilderResult {
     SSB_COL_UNKNOWN_UNIQ = 9,
     SSB_DUPLICATE_PRIM = 10,
     SSB_NO_PRIM = 11,
+    SSB_KEY_TOO_LONG = 12,
 };
 
 struct StaticSchemaBuilder {
