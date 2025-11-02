@@ -6,42 +6,15 @@
 #include <unistd.h>
 
 #include "gdt_page.h"
+#include "type.h"
 #include "unity.h"
 
 static struct BTree tree;
 static struct BTreeHandle handle;
 
-static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
-
-static u8 slotted_binary_search(const struct TreeNode *node, const u8 *key, bool *exact_match) {
-    u8 left = 0, right = node->nkeys;
-
-    while (left < right) {
-        u8 mid = left + (right - left) / 2;
-        const u8 *mid_key;
-        if (node->type == BNODE_INT) {
-            mid_key = TN_GET_IENT(node, mid)->key;
-        } else {
-            mid_key = TN_GET_LENT(node, mid)->key;
-        }
-
-        i32 res = key_cmp(mid_key, key);
-        if (res < 0) {
-            left = mid + 1;
-        } else {
-            if (!res && exact_match) {
-                *exact_match = true;
-            }
-            right = mid;
-        }
-    }
-    return left;
-}
-
 // Helper to create a zero-padded, MAX_KEY length key
 static void make_key(u8 *key_buf, const char *key_str) {
-    memset(key_buf, 0, MAX_KEY);
-    strcpy((char *) key_buf, key_str);
+    encode_blob_key(key_buf, (const u8 *) key_str, strnlen(key_str, MAX_KEY));
 }
 
 // Suite-level setup, called once before all tests
