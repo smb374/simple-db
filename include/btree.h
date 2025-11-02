@@ -45,7 +45,7 @@ struct TreeNode {
     u8 nkeys; // Number of keys, <= MAX_TN_ENTS
     u16 frag_bytes; // Fragmented bytes
     u16 ent_off; // entry offset
-    u16 _pad;
+    u16 version; // Leaf only. Any modifications to the entries increase the version.
     // Pointers
     u32 parent_page;
     u32 prev_page;

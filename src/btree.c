@@ -78,6 +78,7 @@ static struct LeafEnt *leaf_free_entry(struct TreeNode *node, const u8 *key) {
     }
     node->nkeys--;
     node->frag_bytes += sizeof(struct LeafEnt);
+    node->version++;
     return ent;
 }
 
@@ -173,6 +174,7 @@ static void init_node(struct TreeNode *node) {
     node->nkeys = 0;
     node->frag_bytes = 0;
     node->ent_off = PAGE_SIZE;
+    node->version = 0;
     node->parent_page = INVALID_PAGE;
     node->prev_page = INVALID_PAGE;
     node->next_page = INVALID_PAGE;
@@ -390,6 +392,7 @@ i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32
         memcpy(&oval, &TN_GET_LENT(leaf, slot)->val, sizeof(struct LeafVal));
         memcpy(&TN_GET_LENT(leaf, slot)->val, &lval, sizeof(struct LeafVal));
         delete_leafval(handle, &oval);
+        leaf->version++;
         return 0;
     }
     // Copy stack to the Txn, with leaf added at stack top
@@ -481,6 +484,7 @@ static i32 btree_insert_txn(struct BTreeTxn *txn, const u8 slot, const u8 *key, 
         // Now copy the data
         memcpy(TN_GET_LENT(leaf, slot)->key, key, MAX_KEY);
         memcpy(&TN_GET_LENT(leaf, slot)->val, val, sizeof(struct LeafVal));
+        leaf->version++;
         return 0;
     }
 
@@ -715,6 +719,7 @@ static i32 split_leaf_txn(struct BTreeTxn *txn, const u8 *key, const struct Leaf
     // No need to update here sibling here, do it in txn commit stage.
     rleaf->prev_page = leaf_page;
     lleaf->next_page = txn_rpage;
+    lleaf->version++;
 
     return 0;
 }
@@ -1054,6 +1059,7 @@ static void merge_leaf_helper(struct BTreeHandle *handle, const u32 lpage, const
         struct TreeNode *sib = gdt_get_page(handle->bank, rleaf->next_page);
         sib->prev_page = lpage;
     }
+    lleaf->version++;
     gdt_unset_page(handle->bank, rpage);
     *dpage = rpage;
 }
