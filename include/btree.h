@@ -8,6 +8,7 @@
 
 #define MAX_KEY 64
 #define MAX_INLINE 63
+#define MAX_HEIGHT 32
 #define MAX_NORMAL 4000
 #define NODE_HEADER_SIZE 64
 
@@ -73,6 +74,8 @@ struct BTreeHandle {
 };
 
 u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint);
+u8 slotted_binary_search(const struct TreeNode *node, const u8 *key, bool *exact_match);
+i32 read_leafval(struct BTreeHandle *handle, struct LeafVal *val, void *value_out, u32 *len_out);
 
 // Legacy API for 1 tree per bank, currently used in test.
 
@@ -85,6 +88,7 @@ void btree_make_handle(struct BTree *tree, struct BTreeHandle *h);
 
 i32 btree_create_root(struct BTreeHandle *handle, struct GdtPageBank *bank);
 i32 btree_create_known_root(struct BTreeHandle *handle, struct GdtPageBank *bank, u32 page);
+u32 btree_find_leaf(struct BTreeHandle *tree, u32 start_page, const u8 *key, u32 *parent_stack, u16 *stack_top);
 i32 btree_search(struct BTreeHandle *handle, const u8 *key, void *value_out, u32 *len_out);
 i32 btree_insert(struct BTreeHandle *handle, const u8 *key, const void *val, u32 len);
 i32 btree_delete(struct BTreeHandle *handle, const u8 *key);

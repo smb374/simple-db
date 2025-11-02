@@ -40,9 +40,23 @@ struct StaticSchema {
 };
 _Static_assert(sizeof(struct StaticSchema) == DATA_HUGE_SPACE, "Superblock should be DATA_HUGE_SPACE long");
 
+struct IndexHandle {
+    u8 type; // S_TABLE or S_INDEX
+    u8 key_idx;
+    u16 sversion;
+    u32 spage;
+    bool cache_valid;
+    struct BTreeHandle th;
+    struct StaticSchema *schema; // Heap ptr
+};
+
 static inline void *get_schema_root(struct GdtPageBank *b) { return (u8 *) b->pages + SCHEMA_PAGE * PAGE_SIZE; }
 i32 init_schema_tree(struct GdtPageBank *bank);
-i32 create_tree(struct BTreeHandle *handle, struct GdtPageBank *bank, struct StaticSchema *s);
+i32 create_tree(struct IndexHandle *handle, struct GdtPageBank *bank, const struct StaticSchema *s);
+i32 open_tree(struct IndexHandle *handle, struct GdtPageBank *bank, const char *name);
+void close_tree(struct IndexHandle *handle);
+i32 validate_tree_cache(struct IndexHandle *handle);
+i32 refresh_tree_cache(struct IndexHandle *handle);
 
 enum SSBuilderResult {
     SSB_OK = 0, // OK

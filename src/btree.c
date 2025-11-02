@@ -11,13 +11,12 @@
 #include "gdt_page.h"
 #include "utils.h"
 
-#define MAX_HEIGHT 32
 #define TXN_PAGE_MASK 0x80000000
 #define TXN_TLB_DIRTY 0xDEADBEEF
 
 static inline i32 key_cmp(const u8 *k1, const u8 *k2) { return memcmp(k1, k2, MAX_KEY); }
 
-static u8 slotted_binary_search(const struct TreeNode *node, const u8 *key, bool *exact_match) {
+u8 slotted_binary_search(const struct TreeNode *node, const u8 *key, bool *exact_match) {
     u8 left = 0, right = node->nkeys;
 
     while (left < right) {
@@ -106,7 +105,7 @@ static u8 internal_alloc_entry(struct TreeNode *node, const u8 *key) {
     return slot;
 }
 
-static i32 read_leafval(struct BTreeHandle *handle, struct LeafVal *val, void *value_out, u32 *len_out) {
+i32 read_leafval(struct BTreeHandle *handle, struct LeafVal *val, void *value_out, u32 *len_out) {
     i32 ret;
     u8 len;
     switch (val->val_type) {
@@ -190,7 +189,7 @@ u32 alloc_node(struct GdtPageBank *b, u8 type, u32 hint) {
     return page;
 }
 
-static u32 btree_find_leaf(struct BTreeHandle *tree, u32 start_page, const u8 *key, u32 *parent_stack, u16 *stack_top) {
+u32 btree_find_leaf(struct BTreeHandle *tree, u32 start_page, const u8 *key, u32 *parent_stack, u16 *stack_top) {
     if (start_page == INVALID_PAGE) {
         return -1;
     }
