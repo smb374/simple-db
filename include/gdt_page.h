@@ -32,9 +32,9 @@ struct GdtSuperblock {
     u32 gdt_pages; // Number of GDTs, should be MAX_GDTS
     u32 total_pages; // Total pages in file
     u32 total_groups; // Total groups in file
-    u32 _root_page;
     u32 curr_dblk; // Cache current DATA_NORMAL block page number.
     u32 head_dblk; // Head of the DATA_NORMAL block list by page number.
+    u32 _root_page;
     u8 _pad[PAGE_SIZE - 36];
 };
 _Static_assert(sizeof(struct GdtSuperblock) == PAGE_SIZE, "Superblock should be PAGE_SIZE long");

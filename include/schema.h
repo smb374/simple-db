@@ -41,24 +41,24 @@ struct StaticSchema {
 _Static_assert(sizeof(struct StaticSchema) == DATA_HUGE_SPACE, "Superblock should be DATA_HUGE_SPACE long");
 
 static inline void *get_schema_root(struct GdtPageBank *b) { return (u8 *) b->pages + SCHEMA_PAGE * PAGE_SIZE; }
-i32 create_tree(struct BTreeHandle *handle, struct GdtPageBank *bank, struct StaticSchema *s);
 i32 init_schema_tree(struct GdtPageBank *bank);
+i32 create_tree(struct BTreeHandle *handle, struct GdtPageBank *bank, struct StaticSchema *s);
 
 enum SSBuilderResult {
     SSB_OK = 0, // OK
-    SSB_UNKNOWN_SCHEMA_TYPE = 1,
-    SSB_TOO_MUCH_COLS = 2,
-    SSB_NAME_TOO_LONG = 3,
-    SSB_NO_NAME = 4,
-    SSB_TABLE_NAME_TOO_LONG = 5,
-    SSB_NO_TABLE_NAME = 6,
-    SSB_COL_NAME_TOO_LONG = 7,
-    SSB_COL_UNKNOWN_TYPE = 8,
-    SSB_COL_UNKNOWN_UNIQ = 9,
-    SSB_DUPLICATE_PRIM = 10,
-    SSB_NO_PRIM = 11,
-    SSB_KEY_TOO_LONG = 12,
-    SSB_KEY_SIZE_REQUIRED = 13,
+    SSB_UNKNOWN_SCHEMA_TYPE = -1,
+    SSB_TOO_MUCH_COLS = -2,
+    SSB_NAME_TOO_LONG = -3,
+    SSB_NO_NAME = -4,
+    SSB_TABLE_NAME_TOO_LONG = -5,
+    SSB_NO_TABLE_NAME = -6,
+    SSB_COL_NAME_TOO_LONG = -7,
+    SSB_COL_UNKNOWN_TYPE = -8,
+    SSB_COL_UNKNOWN_UNIQ = -9,
+    SSB_DUPLICATE_PRIM = -10,
+    SSB_NO_PRIM = -11,
+    SSB_KEY_TOO_LONG = -12,
+    SSB_KEY_SIZE_REQUIRED = -13,
 };
 
 struct StaticSchemaBuilder {
