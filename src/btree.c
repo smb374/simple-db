@@ -81,14 +81,15 @@ static struct LeafEnt *leaf_free_entry(struct TreeNode *node, const u8 *key) {
     return ent;
 }
 
-static u8 internal_alloc_entry(struct TreeNode *node, const u8 *key, bool *exact_match) {
+static u8 internal_alloc_entry(struct TreeNode *node, const u8 *key) {
     assert(node->type == BNODE_INT);
     if (node->frag_bytes >= MAX_INT_FRAG) {
         defrag_tree_node(node);
     }
 
-    const u8 slot = slotted_binary_search(node, key, exact_match);
-    if (*exact_match) {
+    bool exact_match = false;
+    const u8 slot = slotted_binary_search(node, key, &exact_match);
+    if (exact_match) {
         return slot;
     }
     if (slot == MAX_TN_ENTS) {
@@ -209,8 +210,7 @@ static u32 btree_find_leaf(struct BTreeHandle *tree, u32 start_page, const u8 *k
         if (!cidx && !exact_match) {
             page_num = node->head_page;
         } else {
-            u8 entry_idx = exact_match ? cidx : cidx - 1;
-            page_num = TN_GET_IENT(node, entry_idx)->cpage;
+            page_num = TN_GET_IENT(node, cidx - !exact_match)->cpage;
         }
     }
     return INVALID_PAGE;
@@ -497,8 +497,7 @@ static i32 btree_insert_txn(struct BTreeTxn *txn, const u8 slot, const u8 *key, 
         u32 ppage = SIDX_TO_TXN_PAGE(--stack_top);
         struct TreeNode *pnode = txn_get_page(txn, ppage);
         if (pnode->nkeys < MAX_TN_ENTS) {
-            bool _exact_match = false;
-            u8 cidx = internal_alloc_entry(pnode, pkey, &_exact_match);
+            u8 cidx = internal_alloc_entry(pnode, pkey);
             memcpy(TN_GET_IENT(pnode, cidx)->key, pkey, MAX_KEY);
             TN_GET_IENT(pnode, cidx)->cpage = rpage;
             struct TreeNode *rh = txn_get_page(txn, rpage);
