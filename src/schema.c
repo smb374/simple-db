@@ -46,6 +46,9 @@ i32 ssb_add_column(struct StaticSchemaBuilder *builder, const char *name, u8 typ
         case KEY_UNIQ:
             break;
         case KEY_PRIM:
+            if (size == 0) {
+                return SSB_KEY_SIZE_REQUIRED;
+            }
             if (size > MAX_KEY) {
                 return SSB_KEY_TOO_LONG;
             }

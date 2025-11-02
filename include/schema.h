@@ -58,6 +58,7 @@ enum SSBuilderResult {
     SSB_DUPLICATE_PRIM = 10,
     SSB_NO_PRIM = 11,
     SSB_KEY_TOO_LONG = 12,
+    SSB_KEY_SIZE_REQUIRED = 13,
 };
 
 struct StaticSchemaBuilder {
@@ -70,6 +71,10 @@ struct StaticSchemaBuilder {
 };
 
 i32 ssb_init(struct StaticSchemaBuilder *builder, u8 type);
+// Fixed size for numeric types
+// Variable length types
+// size = 0 means unlimited (for non-key columns)
+// size > 0 means max length (required for key columns)
 i32 ssb_add_column(struct StaticSchemaBuilder *builder, const char *name, u8 type, u8 uniq, u8 size);
 i32 ssb_finalize(struct StaticSchema *s, const struct StaticSchemaBuilder *builder);
 
