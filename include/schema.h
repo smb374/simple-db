@@ -19,14 +19,14 @@ enum {
     KEY_UNIQ = 2,
 };
 
-struct Column {
-    char name[MAX_NAME + 1];
+struct ColumnDef {
+    char name[MAX_NAME];
     u8 type;
     u8 uniq;
-    u8 size;
+    u8 size_hint;
 };
 
-#define SCHEMA_PADDING (DATA_HUGE_SPACE - (8 + (MAX_NAME + 1) * 2 + sizeof(struct Column) * MAX_COLUMN))
+#define SCHEMA_PADDING (DATA_HUGE_SPACE - (8 + (MAX_NAME + 1) * 2 + sizeof(struct ColumnDef) * MAX_COLUMN))
 struct StaticSchema {
     u8 type;
     u8 num_cols;
@@ -35,7 +35,7 @@ struct StaticSchema {
     u32 root_page;
     char name[MAX_NAME + 1];
     char table_name[MAX_NAME + 1];
-    struct Column cols[MAX_COLUMN];
+    struct ColumnDef cols[MAX_COLUMN];
     u8 _pad2[SCHEMA_PADDING];
 };
 _Static_assert(sizeof(struct StaticSchema) == DATA_HUGE_SPACE, "Superblock should be DATA_HUGE_SPACE long");
@@ -81,7 +81,7 @@ struct StaticSchemaBuilder {
     u8 prim_col;
     char *name;
     char *table_name;
-    struct Column cols[MAX_COLUMN];
+    struct ColumnDef cols[MAX_COLUMN];
 };
 
 i32 ssb_init(struct StaticSchemaBuilder *builder, u8 type);
@@ -91,5 +91,71 @@ i32 ssb_init(struct StaticSchemaBuilder *builder, u8 type);
 // size > 0 means max length (required for key columns)
 i32 ssb_add_column(struct StaticSchemaBuilder *builder, const char *name, u8 type, u8 uniq, u8 size);
 i32 ssb_finalize(struct StaticSchema *s, const struct StaticSchemaBuilder *builder);
+
+#define NULL_BITMAPS ((MAX_COLUMN + 7) / 8)
+struct RecordMetadata {
+    u32 size;
+    u8 num_cols;
+    u8 null_bitmap[NULL_BITMAPS];
+    struct VPtr ptr;
+};
+_Static_assert(sizeof(struct RecordMetadata) <= MAX_INLINE, "Metadata must fit inline");
+
+// Saved record encode:
+// [COT][fixed-sized column pack][len1 | blob data1][len2 | blob data2]...
+// COT uses the same column order in the schema
+// If the column is null, COT[idx] = 0 and the bit in NULL bitmap of the metadata should be set.
+
+struct RecordColumn {
+    u8 col_idx;
+    u8 type;
+    union {
+        i64 ival;
+        double dval;
+        struct {
+            const u8 *dat;
+            u32 size;
+        } blob;
+    };
+};
+
+enum {
+    ENC_REC_OK = 0,
+    ENC_REC_INVALID_ARGS = -1,
+    ENC_REC_COL_TYPE_UNMATCH = -2,
+    ENC_REC_COL_INVALID_IDX = -3,
+    ENC_REC_COL_DUPLICATED = -4,
+    ENC_REC_BUF_TOO_SMALL = -5,
+    ENC_REC_NO_PRIM = -6,
+    ENC_REC_ALLOC_FAILED = -7,
+};
+
+enum {
+    DEC_REC_OK = 0,
+    DEC_REC_INVALID_ARGS = -1,
+    DEC_REC_INVALID_METADATA = -2,
+    DEC_REC_INVALID_RECORD = -3,
+    DEC_REC_ALLOC_FAILED = -4,
+};
+
+struct RecordEnc {
+    u8 *buf;
+    u32 buf_capacity; // Allocated size
+    u32 buf_len; // Used size (output)
+    bool managed;
+    u8 prim_col;
+    struct RecordMetadata meta;
+    const struct IndexHandle *handle;
+};
+
+struct RecordDec {
+    const struct RecordMetadata *meta;
+    const struct IndexHandle *handle;
+    struct RecordColumn *cols;
+    u8 n_cols;
+};
+
+i32 encode_record(struct RecordEnc *enc, const struct RecordColumn *cols, u8 n_cols);
+i32 decode_record(struct RecordDec *dec, const u8 *buf, u32 buf_len);
 
 #endif /* ifndef SCHEMA_H */
