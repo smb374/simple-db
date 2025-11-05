@@ -19,3 +19,11 @@ test('test_rwsxlock',
         link_with: db_lib
     )
 )
+
+test('test_pagestore',
+    executable('test_pagestore_runner', 'test_pagestore.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

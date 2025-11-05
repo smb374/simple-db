@@ -1,6 +1,7 @@
 inc = include_directories('../include')
 
 db_srcs = [
+  './pagestore.c',
   './rwsxlock.c',
   './utils.c',
 ]

@@ -1,8 +1,10 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -18,7 +20,8 @@ typedef int64_t i64;
 #define MIN(x, y) ((y) ^ (((x) ^ (y)) & -((x) < (y))))
 #define MAX(x, y) ((x) ^ (((x) ^ (y)) & -((x) < (y))))
 
-#define MAX_NAME 64
+void logger(FILE *f, const char *tag, const char *format, ...);
+i32 open_relative(const char *path, i32 flag, mode_t mode);
 
 // Atomics
 typedef _Atomic(u8) atomic_u8;

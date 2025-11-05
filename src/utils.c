@@ -1,8 +1,15 @@
 #include "utils.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 void logger(FILE *f, const char *tag, const char *format, ...) {
 #ifdef LOGGING
@@ -14,6 +21,44 @@ void logger(FILE *f, const char *tag, const char *format, ...) {
     vfprintf(f, format, args);
     va_end(args);
 #endif
+}
+
+i32 open_relative(const char *path, i32 flag, mode_t mode) {
+    char fpath[PATH_MAX + 1];
+    i32 dfd, fd;
+
+    char *dsrc = strndup(path, PATH_MAX);
+    char *bsrc = strndup(path, PATH_MAX);
+
+    const char *dpath = dirname(dsrc);
+    const char *bpath = basename(bsrc);
+
+    errno = 0;
+    if (!realpath(dpath, fpath)) {
+        logger(stderr, "ERROR", "[open_relative] Failed to resolve full path: %s\n", strerror(errno));
+        goto FAIL;
+    }
+    if ((dfd = open(fpath, O_RDONLY | O_DIRECTORY)) < 0) {
+        logger(stderr, "ERROR", "[open_relative] Failed to open directory '%s': %s\n", dpath, strerror(errno));
+        goto FAIL;
+    }
+    if ((fd = openat(dfd, bpath, flag, mode)) < 0) {
+        logger(stderr, "ERROR", "[open_relative] Failed to open file '%s' in path '%s': %s\n", bpath, dpath,
+               strerror(errno));
+        goto C_DFD;
+    }
+
+    close(dfd);
+    free(dsrc);
+    free(bsrc);
+    return fd;
+
+C_DFD:
+    close(dfd);
+FAIL:
+    free(dsrc);
+    free(bsrc);
+    return -1;
 }
 
 /* LOAD */
