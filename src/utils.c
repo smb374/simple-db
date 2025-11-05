@@ -1,5 +1,21 @@
 #include "utils.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+#include <time.h>
+
+void logger(FILE *f, const char *tag, const char *format, ...) {
+#ifdef LOGGING
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    fprintf(f, "%ld.%ld [%s] ", tp.tv_sec, tp.tv_nsec, tag);
+    va_list args;
+    va_start(args, format);
+    vfprintf(f, format, args);
+    va_end(args);
+#endif
+}
+
 /* LOAD */
 u16 load16le(const u8 *src) { return (u16) (src[0] << 0) | (u16) (src[1] << 8); }
 

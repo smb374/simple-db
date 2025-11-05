@@ -11,3 +11,11 @@ unity_dep = dependency('unity', fallback: ['unity', 'unity_dep'])
 #         link_with: db_lib
 #     )
 # )
+
+test('test_rwsxlock',
+    executable('test_rwsxlock_runner', 'test_rwsxlock.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

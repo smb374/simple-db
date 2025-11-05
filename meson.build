@@ -5,5 +5,9 @@ project('simple-db', 'c',
 
 unity_dep = dependency('unity', fallback : ['unity', 'unity_dep'])
 
+if get_option('buildtype') == 'debug'
+  add_project_arguments('-DLOGGING', language : 'c')
+endif
+
 subdir('src')
 subdir('tests')
