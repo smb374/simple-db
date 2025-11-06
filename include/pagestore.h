@@ -7,6 +7,7 @@
 #include "utils.h"
 
 #define PAGE_SIZE 4096
+#define INVALID_PAGE 0xFFFFFFFF
 #define MAX_STORE_SIZE (4ULL << 40)
 
 struct PageStore {

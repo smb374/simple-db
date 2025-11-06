@@ -27,3 +27,11 @@ test('test_pagestore',
         link_with: db_lib
     )
 )
+
+test('test_bufpool',
+    executable('test_bufpool_runner', 'test_bufpool.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)
