@@ -594,6 +594,289 @@ void test_destroy_flushes_dirty_pages(void) {
 }
 
 // =============================================================================
+// RACE CONDITION TESTS
+// =============================================================================
+
+struct concurrent_cold_load_args {
+    struct BufPool *bp;
+    u32 page_num;
+    pthread_barrier_t *barrier;
+    struct PageFrame *result_frame;
+    u32 hint;
+    i32 result;
+};
+
+void *concurrent_cold_loader(void *arg) {
+    struct concurrent_cold_load_args *args = (struct concurrent_cold_load_args *) arg;
+
+    // Wait for all threads to be ready
+    pthread_barrier_wait(args->barrier);
+
+    // Both threads try to fetch the same cold page simultaneously
+    args->result_frame = bpool_fetch_page(args->bp, args->page_num, &args->hint, LATCH_SHARED);
+
+    if (args->result_frame == NULL) {
+        args->result = -1;
+        return NULL;
+    }
+
+    args->result = 0;
+    return NULL;
+}
+
+void test_concurrent_cold_load_same_page_no_duplicate(void) {
+    struct PageStore *ps = pstore_create(NULL, 100);
+    TEST_ASSERT_NOT_NULL(ps);
+
+    // Write data to page 42 in the store (but not in buffer pool yet)
+    u8 write_buf[PAGE_SIZE];
+    fill_page_with_pattern(write_buf, 42, 0x88);
+    pstore_write(ps, 42, write_buf);
+
+    struct BufPool *bp = bpool_init(ps);
+    TEST_ASSERT_NOT_NULL(bp);
+
+    // Verify page 42 is not in buffer pool
+    for (u32 i = 0; i < POOL_SIZE; i++) {
+        TEST_ASSERT_NOT_EQUAL(42, LOAD(&bp->tlb[i], RELAXED));
+    }
+
+    // Set up barrier for synchronization
+    pthread_barrier_t barrier;
+    pthread_barrier_init(&barrier, NULL, 2);
+
+    // Create two threads that will race to load page 42
+    pthread_t thread1, thread2;
+    struct concurrent_cold_load_args args1 = {
+            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .hint = 0, .result = -1};
+    struct concurrent_cold_load_args args2 = {
+            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .hint = 0, .result = -1};
+
+    pthread_create(&thread1, NULL, concurrent_cold_loader, &args1);
+    pthread_create(&thread2, NULL, concurrent_cold_loader, &args2);
+
+    pthread_join(thread1, NULL);
+    pthread_join(thread2, NULL);
+
+    // Both threads should succeed
+    TEST_ASSERT_EQUAL(0, args1.result);
+    TEST_ASSERT_EQUAL(0, args2.result);
+    TEST_ASSERT_NOT_NULL(args1.result_frame);
+    TEST_ASSERT_NOT_NULL(args2.result_frame);
+
+    // CRITICAL: Both threads should see the SAME frame (no duplicate)
+    TEST_ASSERT_EQUAL_PTR(args1.result_frame, args2.result_frame);
+
+    // Verify data is correct
+    verify_page_pattern(args1.result_frame->data, 42, 0x88);
+
+    // Verify only ONE TLB entry exists for page 42
+    u32 tlb_count = 0;
+    u32 found_idx = INVALID_PAGE;
+    for (u32 i = 0; i < POOL_SIZE; i++) {
+        if (LOAD(&bp->tlb[i], RELAXED) == 42) {
+            tlb_count++;
+            found_idx = i;
+        }
+    }
+    TEST_ASSERT_EQUAL(1, tlb_count);
+    TEST_ASSERT_NOT_EQUAL(INVALID_PAGE, found_idx);
+
+    // Verify the frame is at the TLB index we found
+    TEST_ASSERT_EQUAL_PTR(&bp->frames[found_idx], args1.result_frame);
+
+    // Pin count should be 2 (one from each thread)
+    TEST_ASSERT_EQUAL(2, LOAD(&args1.result_frame->pin_cnt, RELAXED));
+
+    // Cleanup: unlock and unpin from both threads
+    rwsx_unlock(&args1.result_frame->latch, LATCH_SHARED);
+    bpool_unpin_page(bp, 42, &args1.hint, false);
+
+    rwsx_unlock(&args2.result_frame->latch, LATCH_SHARED);
+    bpool_unpin_page(bp, 42, &args2.hint, false);
+
+    TEST_ASSERT_EQUAL(0, LOAD(&args1.result_frame->pin_cnt, RELAXED));
+
+    pthread_barrier_destroy(&barrier);
+    bpool_destroy(bp);
+    pstore_close(ps);
+}
+
+struct concurrent_write_flush_args {
+    struct BufPool *bp;
+    u32 page_num;
+    volatile bool *writer_started;
+    volatile bool *writer_done;
+    i32 result;
+};
+
+void *slow_writer_thread(void *arg) {
+    struct concurrent_write_flush_args *args = (struct concurrent_write_flush_args *) arg;
+
+    // Fetch page with X-latch
+    u32 hint = 0;
+    struct PageFrame *frame = bpool_fetch_page(args->bp, args->page_num, &hint, LATCH_EXCLUSIVE);
+    if (frame == NULL) {
+        args->result = -1;
+        return NULL;
+    }
+
+    // Write pattern SLOWLY (0xFF byte by byte with sleep)
+    // This gives the flusher thread time to try flushing mid-write
+    *args->writer_started = true;
+
+    STORE(&frame->is_dirty, true, RELEASE);
+    for (u32 i = 0; i < PAGE_SIZE; i++) {
+        frame->data[i] = 0xFF;
+
+        // Sleep every 512 bytes to give flusher a chance
+        if (i % 512 == 0) {
+            usleep(1000); // 1ms
+        }
+    }
+
+    *args->writer_done = true;
+
+    // Unpin as dirty
+    rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
+    bpool_unpin_page(args->bp, args->page_num, &hint, true);
+
+    args->result = 0;
+    return NULL;
+}
+
+void *concurrent_flusher_thread(void *arg) {
+    struct concurrent_write_flush_args *args = (struct concurrent_write_flush_args *) arg;
+
+    // Wait for writer to start
+    while (!*args->writer_started) {
+        usleep(100);
+    }
+
+    // Sleep a bit to ensure we're in the middle of the write
+    usleep(500);
+
+    // Try to flush while writer is still writing
+    // WITHOUT the fix: reads torn data (mix of 0x00 and 0xFF)
+    // WITH the fix: blocks on frame S-latch until writer finishes
+    u32 hint = 0;
+    bpool_flush_page(args->bp, args->page_num, &hint);
+
+    args->result = 0;
+    return NULL;
+}
+
+void test_concurrent_write_and_flush_no_torn_write(void) {
+    struct PageStore *ps = pstore_create(NULL, 100);
+    TEST_ASSERT_NOT_NULL(ps);
+
+    // Initialize page 50 to all 0x00
+    u8 init_buf[PAGE_SIZE];
+    memset(init_buf, 0x00, PAGE_SIZE);
+    pstore_write(ps, 50, init_buf);
+
+    struct BufPool *bp = bpool_init(ps);
+    TEST_ASSERT_NOT_NULL(bp);
+
+    // Setup synchronization
+    volatile bool writer_started = false;
+    volatile bool writer_done = false;
+
+    struct concurrent_write_flush_args writer_args = {
+            .bp = bp, .page_num = 50, .writer_started = &writer_started, .writer_done = &writer_done, .result = -1};
+
+    struct concurrent_write_flush_args flusher_args = {
+            .bp = bp, .page_num = 50, .writer_started = &writer_started, .writer_done = &writer_done, .result = -1};
+
+    pthread_t writer_thread, flusher_thread;
+    pthread_create(&writer_thread, NULL, slow_writer_thread, &writer_args);
+    pthread_create(&flusher_thread, NULL, concurrent_flusher_thread, &flusher_args);
+
+    pthread_join(writer_thread, NULL);
+    pthread_join(flusher_thread, NULL);
+
+    TEST_ASSERT_EQUAL(0, writer_args.result);
+    TEST_ASSERT_EQUAL(0, flusher_args.result);
+
+    // Read from pagestore and verify consistency
+    u8 read_buf[PAGE_SIZE];
+    pstore_read(ps, 50, read_buf);
+
+    // Data should be ALL 0xFF (writer's final state)
+    // NOT a mix of 0x00 and 0xFF (torn write)
+    for (u32 i = 0; i < PAGE_SIZE; i++) {
+        if (read_buf[i] != 0xFF) {
+            TEST_FAIL_MESSAGE("Detected torn write: page contains mix of 0x00 and 0xFF");
+        }
+    }
+
+    bpool_destroy(bp);
+    pstore_close(ps);
+}
+
+void *flush_all_thread(void *arg) {
+    struct concurrent_write_flush_args *args = (struct concurrent_write_flush_args *) arg;
+
+    while (!*args->writer_started) {
+        usleep(100);
+    }
+
+    usleep(500);
+
+    // Call flush_all (should acquire frame latch)
+    bpool_flush_all(args->bp);
+
+    args->result = 0;
+    return NULL;
+}
+
+void test_concurrent_write_and_flush_all_no_torn_write(void) {
+    struct PageStore *ps = pstore_create(NULL, 100);
+    TEST_ASSERT_NOT_NULL(ps);
+
+    // Initialize page 60 to all 0x00
+    u8 init_buf[PAGE_SIZE];
+    memset(init_buf, 0x00, PAGE_SIZE);
+    pstore_write(ps, 60, init_buf);
+
+    struct BufPool *bp = bpool_init(ps);
+    TEST_ASSERT_NOT_NULL(bp);
+
+    volatile bool writer_started = false;
+    volatile bool writer_done = false;
+
+    struct concurrent_write_flush_args writer_args = {
+            .bp = bp, .page_num = 60, .writer_started = &writer_started, .writer_done = &writer_done, .result = -1};
+
+    // Flusher thread that calls flush_all
+    struct concurrent_write_flush_args flusher_args = {
+            .bp = bp, .page_num = 60, .writer_started = &writer_started, .writer_done = &writer_done, .result = -1};
+
+    pthread_t writer_thread, flusher_thread;
+    pthread_create(&writer_thread, NULL, slow_writer_thread, &writer_args);
+    pthread_create(&flusher_thread, NULL, flush_all_thread, &flusher_args);
+
+    pthread_join(writer_thread, NULL);
+    pthread_join(flusher_thread, NULL);
+
+    TEST_ASSERT_EQUAL(0, writer_args.result);
+    TEST_ASSERT_EQUAL(0, flusher_args.result);
+
+    // Verify consistency
+    u8 read_buf[PAGE_SIZE];
+    pstore_read(ps, 60, read_buf);
+
+    for (u32 i = 0; i < PAGE_SIZE; i++) {
+        if (read_buf[i] != 0xFF) {
+            TEST_FAIL_MESSAGE("Detected torn write in flush_all: page contains mix of 0x00 and 0xFF");
+        }
+    }
+
+    bpool_destroy(bp);
+    pstore_close(ps);
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -641,6 +924,11 @@ int main(void) {
     // Concurrent access
     RUN_TEST(test_concurrent_readers_same_page);
     RUN_TEST(test_concurrent_readers_different_pages);
+
+    // Race condition tests
+    RUN_TEST(test_concurrent_cold_load_same_page_no_duplicate);
+    RUN_TEST(test_concurrent_write_and_flush_no_torn_write);
+    RUN_TEST(test_concurrent_write_and_flush_all_no_torn_write);
 
     // Persistence
     RUN_TEST(test_destroy_flushes_dirty_pages);
