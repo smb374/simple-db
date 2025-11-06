@@ -44,7 +44,7 @@ void test_bpool_init_and_destroy(void) {
 
     // Verify all frames initialized
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        TEST_ASSERT_EQUAL(0, LOAD(&bp->tlb[i], RELAXED));
+        TEST_ASSERT_EQUAL(INVALID_PAGE, LOAD(&bp->tlb[i], RELAXED));
         TEST_ASSERT_EQUAL(0, LOAD(&bp->frames[i].pin_cnt, RELAXED));
         TEST_ASSERT_FALSE(LOAD(&bp->frames[i].is_dirty, RELAXED));
     }

@@ -15,7 +15,7 @@ struct BufPool *bpool_init(struct PageStore *store) {
     bp->store = store;
     bp->clock_hand = 0;
 
-    memset(bp->tlb, 0, sizeof(u32) * POOL_SIZE);
+    memset(bp->tlb, 0xFF, sizeof(u32) * POOL_SIZE);
     memset(bp->frames, 0, sizeof(struct PageFrame) * POOL_SIZE);
 
     rwsx_init(&bp->latch);
