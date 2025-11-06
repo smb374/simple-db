@@ -1,12 +1,14 @@
 #include "bufpool.h"
+
 #include <stdlib.h>
 #include <string.h>
 
 #include "pagestore.h"
 #include "rwsxlock.h"
+#include "shtable.h"
 #include "utils.h"
 
-static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, u32 *idx_hint, LatchMode mode);
+static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchMode mode);
 static u32 find_victim_clock(struct BufPool *bp);
 
 struct BufPool *bpool_init(struct PageStore *store) {
@@ -14,6 +16,7 @@ struct BufPool *bpool_init(struct PageStore *store) {
 
     bp->store = store;
     bp->clock_hand = 0;
+    bp->index = sht_init(2 * POOL_SIZE);
 
     memset(bp->tlb, 0xFF, sizeof(u32) * POOL_SIZE);
     memset(bp->frames, 0, sizeof(struct PageFrame) * POOL_SIZE);
@@ -27,84 +30,53 @@ struct BufPool *bpool_init(struct PageStore *store) {
     return bp;
 }
 
-struct PageFrame *bpool_fetch_page(struct BufPool *bp, u32 page_num, u32 *idx_hint, LatchMode mode) {
+struct PageFrame *bpool_fetch_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
     rwsx_lock(&bp->latch, LATCH_SHARED);
-    u32 start = (idx_hint && *idx_hint < POOL_SIZE) ? *idx_hint : 0;
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        u32 idx = (start + i) % POOL_SIZE;
-        if (LOAD(&bp->tlb[idx], ACQUIRE) == page_num) {
-            if (idx_hint) {
-                *idx_hint = idx;
-            }
-            struct PageFrame *frame = &bp->frames[idx];
-            FADD(&frame->pin_cnt, 1, RELEASE);
-            STORE(&frame->clock_bit, 1, RELEASE);
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        struct PageFrame *frame = &bp->frames[frame_idx];
 
-            rwsx_unlock(&bp->latch, LATCH_SHARED);
+        FADD(&frame->pin_cnt, 1, RELEASE);
+        STORE(&frame->clock_bit, 1, RELEASE);
 
-            rwsx_lock(&frame->latch, mode);
-            return frame;
-        }
+        rwsx_unlock(&bp->latch, LATCH_SHARED);
+        rwsx_lock(&frame->latch, mode);
+        return frame;
     }
 
     rwsx_unlock(&bp->latch, LATCH_SHARED);
-    return cold_load_page(bp, page_num, idx_hint, mode);
+    return cold_load_page(bp, page_num, mode);
 }
 
-void bpool_unpin_page(struct BufPool *bp, u32 page_num, u32 *idx_hint, bool is_dirty) {
-    rwsx_lock(&bp->latch, LATCH_SHARED);
-    u32 start = (idx_hint && *idx_hint < POOL_SIZE) ? *idx_hint : 0;
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        u32 idx = (start + i) % POOL_SIZE;
-        if (LOAD(&bp->tlb[idx], ACQUIRE) == page_num) {
-            if (idx_hint) {
-                *idx_hint = idx;
-            }
-            struct PageFrame *frame = &bp->frames[idx];
+void bpool_unpin_page(struct BufPool *bp, u32 page_num, bool is_dirty) {
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        struct PageFrame *frame = &bp->frames[frame_idx];
 
-            if (is_dirty) {
-                STORE(&frame->is_dirty, true, RELEASE);
-            }
-
-            FSUB(&frame->pin_cnt, 1, RELEASE);
-            rwsx_unlock(&bp->latch, LATCH_SHARED);
-            return;
+        if (is_dirty) {
+            STORE(&frame->is_dirty, true, RELEASE);
         }
+        FSUB(&frame->pin_cnt, 1, RELEASE);
     }
-    rwsx_unlock(&bp->latch, LATCH_SHARED);
 }
 
-void bpool_flush_page(struct BufPool *bp, u32 page_num, u32 *idx_hint) {
+void bpool_flush_page(struct BufPool *bp, u32 page_num) {
     rwsx_lock(&bp->latch, LATCH_SHARED);
-    u32 start = (idx_hint && *idx_hint < POOL_SIZE) ? *idx_hint : 0;
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        u32 idx = (start + i) % POOL_SIZE;
-        if (LOAD(&bp->tlb[idx], ACQUIRE) == page_num) {
-            if (idx_hint) {
-                *idx_hint = idx;
-            }
-            struct PageFrame *frame = &bp->frames[idx];
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        struct PageFrame *frame = &bp->frames[frame_idx];
+        FADD(&frame->pin_cnt, 1, RELEASE);
+        rwsx_unlock(&bp->latch, LATCH_SHARED);
+        rwsx_lock(&frame->latch, LATCH_SHARED);
 
-            // Pin to prevent eviction while we release buffer pool latch
-            FADD(&frame->pin_cnt, 1, RELEASE);
-            rwsx_unlock(&bp->latch, LATCH_SHARED);
-
-            rwsx_lock(&frame->latch, LATCH_SHARED);
-
-            if (LOAD(&frame->is_dirty, ACQUIRE)) {
-                pstore_write(bp->store, page_num, frame->data);
-                STORE(&frame->is_dirty, false, RELEASE);
-            }
-
-            rwsx_unlock(&frame->latch, LATCH_SHARED);
-
-            // Unpin
-            rwsx_lock(&bp->latch, LATCH_SHARED);
-            FSUB(&frame->pin_cnt, 1, RELEASE);
-            rwsx_unlock(&bp->latch, LATCH_SHARED);
-
-            return;
+        if (LOAD(&frame->is_dirty, ACQUIRE)) {
+            pstore_write(bp->store, page_num, frame->data);
+            STORE(&frame->is_dirty, false, RELEASE);
         }
+
+        rwsx_unlock(&frame->latch, LATCH_SHARED);
+        FSUB(&frame->pin_cnt, 1, RELEASE);
+        return;
     }
     rwsx_unlock(&bp->latch, LATCH_SHARED);
 }
@@ -137,27 +109,23 @@ void bpool_destroy(struct BufPool *bp) {
     }
 
     rwsx_destroy(&bp->latch);
-
+    sht_destroy(bp->index);
     free(bp);
 }
 
-static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, u32 *idx_hint, LatchMode mode) {
+static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
     rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
     // Check again to ensure that the page_num isn't pulled by others
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        if (LOAD(&bp->tlb[i], ACQUIRE) == page_num) {
-            struct PageFrame *frame = &bp->frames[i];
-            FADD(&frame->pin_cnt, 1, RELEASE);
-            STORE(&frame->clock_bit, 1, RELEASE);
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        struct PageFrame *frame = &bp->frames[frame_idx];
 
-            rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+        FADD(&frame->pin_cnt, 1, RELEASE);
+        STORE(&frame->clock_bit, 1, RELEASE);
 
-            if (idx_hint) {
-                *idx_hint = i;
-            }
-            rwsx_lock(&frame->latch, mode);
-            return frame;
-        }
+        rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+        rwsx_lock(&frame->latch, mode);
+        return frame;
     }
 
     u32 victim = find_victim_clock(bp);
@@ -165,29 +133,35 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, u32 *i
         rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
         return NULL;
     }
-    if (idx_hint) {
-        *idx_hint = victim;
-    }
+
     struct PageFrame *frame = &bp->frames[victim];
 
     u32 old_page = LOAD(&bp->tlb[victim], ACQUIRE);
+
     if (old_page != INVALID_PAGE && LOAD(&frame->is_dirty, ACQUIRE)) {
         pstore_write(bp->store, old_page, frame->data);
     }
 
-    rwsx_upgrade_sx(&bp->latch);
-    pstore_read(bp->store, page_num, frame->data);
+    u8 buf[PAGE_SIZE];
+    memset(buf, 0, PAGE_SIZE);
+    if (pstore_read(bp->store, page_num, buf) < 0) {
+        rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+        return NULL;
+    }
+    memcpy(frame->data, buf, PAGE_SIZE);
 
+    if (old_page != INVALID_PAGE) {
+        sht_unset(bp->index, old_page);
+    }
     STORE(&frame->pin_cnt, 1, RELEASE);
     STORE(&frame->clock_bit, 1, RELEASE);
     STORE(&frame->is_dirty, false, RELEASE);
 
+    sht_set(bp->index, page_num, victim);
     STORE(&bp->tlb[victim], page_num, RELEASE);
 
-    rwsx_downgrade_sx(&bp->latch);
-
-    rwsx_lock(&frame->latch, mode);
     rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+    rwsx_lock(&frame->latch, mode);
 
     return frame;
 }

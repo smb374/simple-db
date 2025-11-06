@@ -66,8 +66,7 @@ void test_fetch_page_cold_load(void) {
     TEST_ASSERT_NOT_NULL(bp);
 
     // Fetch page 5 (cold load)
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(bp, 5, &hint, LATCH_SHARED);
+    struct PageFrame *frame = bpool_fetch_page(bp, 5, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame);
 
     // Verify data loaded correctly
@@ -78,11 +77,13 @@ void test_fetch_page_cold_load(void) {
     TEST_ASSERT_EQUAL(1, LOAD(&frame->clock_bit, RELAXED));
     TEST_ASSERT_FALSE(LOAD(&frame->is_dirty, RELAXED));
 
-    // Verify TLB updated
-    TEST_ASSERT_EQUAL(5, LOAD(&bp->tlb[hint], RELAXED));
+    // Verify page is in index and TLB
+    u32 frame_idx;
+    TEST_ASSERT_EQUAL(0, sht_get(bp->index, 5, &frame_idx));
+    TEST_ASSERT_EQUAL(5, LOAD(&bp->tlb[frame_idx], RELAXED));
 
     rwsx_unlock(&frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 5, &hint, false);
+    bpool_unpin_page(bp, 5, false);
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -97,26 +98,22 @@ void test_fetch_page_hot(void) {
     fill_page_with_pattern(write_buf, 10, 0xBB);
     pstore_write(ps, 10, write_buf);
 
-    u32 hint = 0;
-    struct PageFrame *frame1 = bpool_fetch_page(bp, 10, &hint, LATCH_SHARED);
+    struct PageFrame *frame1 = bpool_fetch_page(bp, 10, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame1);
-    u32 first_hint = hint;
 
     rwsx_unlock(&frame1->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 10, &hint, false);
+    bpool_unpin_page(bp, 10, false);
 
     // Fetch again (hot - should be in pool)
-    hint = first_hint;
-    struct PageFrame *frame2 = bpool_fetch_page(bp, 10, &hint, LATCH_SHARED);
+    struct PageFrame *frame2 = bpool_fetch_page(bp, 10, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame2);
     TEST_ASSERT_EQUAL(frame1, frame2);
-    TEST_ASSERT_EQUAL(first_hint, hint);
 
     // Verify data still correct
     verify_page_pattern(frame2->data, 10, 0xBB);
 
     rwsx_unlock(&frame2->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 10, &hint, false);
+    bpool_unpin_page(bp, 10, false);
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -126,8 +123,7 @@ void test_unpin_marks_dirty(void) {
     struct PageStore *ps = pstore_create(NULL, 100);
     struct BufPool *bp = bpool_init(ps);
 
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(bp, 0, &hint, LATCH_EXCLUSIVE);
+    struct PageFrame *frame = bpool_fetch_page(bp, 0, LATCH_EXCLUSIVE);
     TEST_ASSERT_NOT_NULL(frame);
 
     // Modify page
@@ -135,7 +131,7 @@ void test_unpin_marks_dirty(void) {
 
     // Unpin as dirty
     rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-    bpool_unpin_page(bp, 0, &hint, true);
+    bpool_unpin_page(bp, 0, true);
 
     // Verify is_dirty flag set
     TEST_ASSERT_TRUE(LOAD(&frame->is_dirty, RELAXED));
@@ -149,19 +145,18 @@ void test_flush_dirty_page(void) {
     struct BufPool *bp = bpool_init(ps);
 
     // Fetch and modify page
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(bp, 7, &hint, LATCH_EXCLUSIVE);
+    struct PageFrame *frame = bpool_fetch_page(bp, 7, LATCH_EXCLUSIVE);
     TEST_ASSERT_NOT_NULL(frame);
 
     fill_page_with_pattern(frame->data, 7, 0xDD);
 
     rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-    bpool_unpin_page(bp, 7, &hint, true);
+    bpool_unpin_page(bp, 7, true);
 
     TEST_ASSERT_TRUE(LOAD(&frame->is_dirty, RELAXED));
 
     // Flush the page
-    bpool_flush_page(bp, 7, &hint);
+    bpool_flush_page(bp, 7);
 
     TEST_ASSERT_FALSE(LOAD(&frame->is_dirty, RELAXED));
 
@@ -184,17 +179,16 @@ void test_flush_clean_page_no_write(void) {
     pstore_write(ps, 3, write_buf);
 
     // Fetch page (clean)
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(bp, 3, &hint, LATCH_SHARED);
+    struct PageFrame *frame = bpool_fetch_page(bp, 3, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame);
 
     rwsx_unlock(&frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 3, &hint, false);
+    bpool_unpin_page(bp, 3, false);
 
     TEST_ASSERT_FALSE(LOAD(&frame->is_dirty, RELAXED));
 
     // Flush clean page (should not write)
-    bpool_flush_page(bp, 3, &hint);
+    bpool_flush_page(bp, 3);
 
     TEST_ASSERT_FALSE(LOAD(&frame->is_dirty, RELAXED));
 
@@ -208,14 +202,13 @@ void test_flush_all(void) {
 
     // Fetch and modify multiple pages
     for (u32 i = 0; i < 5; i++) {
-        u32 hint = 0;
-        struct PageFrame *frame = bpool_fetch_page(bp, i, &hint, LATCH_EXCLUSIVE);
+        struct PageFrame *frame = bpool_fetch_page(bp, i, LATCH_EXCLUSIVE);
         TEST_ASSERT_NOT_NULL(frame);
 
         fill_page_with_pattern(frame->data, i, 0x22);
 
         rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-        bpool_unpin_page(bp, i, &hint, true);
+        bpool_unpin_page(bp, i, true);
     }
 
     // Flush all
@@ -240,24 +233,23 @@ void test_multiple_pins_same_page(void) {
     struct PageStore *ps = pstore_create(NULL, 100);
     struct BufPool *bp = bpool_init(ps);
 
-    u32 hint = 0;
-    struct PageFrame *frame1 = bpool_fetch_page(bp, 0, &hint, LATCH_SHARED);
+    struct PageFrame *frame1 = bpool_fetch_page(bp, 0, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame1);
     TEST_ASSERT_EQUAL(1, LOAD(&frame1->pin_cnt, RELAXED));
 
     // Fetch again (simulating second accessor)
-    struct PageFrame *frame2 = bpool_fetch_page(bp, 0, &hint, LATCH_SHARED);
+    struct PageFrame *frame2 = bpool_fetch_page(bp, 0, LATCH_SHARED);
     TEST_ASSERT_EQUAL(frame1, frame2);
     TEST_ASSERT_EQUAL(2, LOAD(&frame1->pin_cnt, RELAXED));
 
     // Unpin once
     rwsx_unlock(&frame1->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 0, &hint, false);
+    bpool_unpin_page(bp, 0, false);
     TEST_ASSERT_EQUAL(1, LOAD(&frame1->pin_cnt, RELAXED));
 
     // Unpin again
     rwsx_unlock(&frame2->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 0, &hint, false);
+    bpool_unpin_page(bp, 0, false);
     TEST_ASSERT_EQUAL(0, LOAD(&frame1->pin_cnt, RELAXED));
 
     bpool_destroy(bp);
@@ -270,48 +262,45 @@ void test_multiple_pins_same_page(void) {
 
 void test_eviction_clock_algorithm(void) {
     // Use small pool size for easier testing
-    struct PageStore *ps = pstore_create(NULL, 100);
+    struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
     // Fill pool with POOL_SIZE pages
-    u32 hints[POOL_SIZE];
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        hints[i] = 0;
-        struct PageFrame *frame = bpool_fetch_page(bp, i, &hints[i], LATCH_SHARED);
+        struct PageFrame *frame = bpool_fetch_page(bp, i, LATCH_SHARED);
         TEST_ASSERT_NOT_NULL(frame);
 
         fill_page_with_pattern(frame->data, i, 0x33);
 
         rwsx_unlock(&frame->latch, LATCH_SHARED);
-        bpool_unpin_page(bp, i, &hints[i], false);
+        bpool_unpin_page(bp, i, false);
     }
 
     // All frames should have clock_bit = 1 from fetch
     // Fetch one more page - should trigger eviction
-    u32 new_hint = 0;
-    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, &new_hint, LATCH_SHARED);
+    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(new_frame);
 
-    // Verify new page loaded
-    TEST_ASSERT_EQUAL(POOL_SIZE, LOAD(&bp->tlb[new_hint], RELAXED));
+    // Verify new page loaded in index
+    u32 frame_idx;
+    TEST_ASSERT_EQUAL(0, sht_get(bp->index, POOL_SIZE, &frame_idx));
+    TEST_ASSERT_EQUAL(POOL_SIZE, LOAD(&bp->tlb[frame_idx], RELAXED));
 
     rwsx_unlock(&new_frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, POOL_SIZE, &new_hint, false);
+    bpool_unpin_page(bp, POOL_SIZE, false);
 
     bpool_destroy(bp);
     pstore_close(ps);
 }
 
 void test_eviction_skips_pinned_pages(void) {
-    struct PageStore *ps = pstore_create(NULL, 100);
+    struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
     // Fill pool
-    u32 hints[POOL_SIZE];
     struct PageFrame *frames[POOL_SIZE];
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        hints[i] = 0;
-        frames[i] = bpool_fetch_page(bp, i, &hints[i], LATCH_SHARED);
+        frames[i] = bpool_fetch_page(bp, i, LATCH_SHARED);
         TEST_ASSERT_NOT_NULL(frames[i]);
     }
 
@@ -321,25 +310,24 @@ void test_eviction_skips_pinned_pages(void) {
     }
 
     // Try to fetch a new page - should fail (all pinned)
-    u32 new_hint = 0;
-    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, &new_hint, LATCH_SHARED);
+    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
     TEST_ASSERT_NULL(new_frame);
 
     // Unpin one page
     rwsx_unlock(&frames[0]->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 0, &hints[0], false);
+    bpool_unpin_page(bp, 0, false);
 
     // Now fetch should succeed
-    new_frame = bpool_fetch_page(bp, POOL_SIZE, &new_hint, LATCH_SHARED);
+    new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(new_frame);
 
     // Clean up
     rwsx_unlock(&new_frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, POOL_SIZE, &new_hint, false);
+    bpool_unpin_page(bp, POOL_SIZE, false);
 
     for (u32 i = 1; i < POOL_SIZE; i++) {
         rwsx_unlock(&frames[i]->latch, LATCH_SHARED);
-        bpool_unpin_page(bp, i, &hints[i], false);
+        bpool_unpin_page(bp, i, false);
     }
 
     bpool_destroy(bp);
@@ -347,20 +335,18 @@ void test_eviction_skips_pinned_pages(void) {
 }
 
 void test_eviction_writes_back_dirty_page(void) {
-    struct PageStore *ps = pstore_create(NULL, 100);
+    struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
     // Fill pool with dirty pages
-    u32 hints[POOL_SIZE];
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        hints[i] = 0;
-        struct PageFrame *frame = bpool_fetch_page(bp, i, &hints[i], LATCH_EXCLUSIVE);
+        struct PageFrame *frame = bpool_fetch_page(bp, i, LATCH_EXCLUSIVE);
         TEST_ASSERT_NOT_NULL(frame);
 
         fill_page_with_pattern(frame->data, i, 0x44);
 
         rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-        bpool_unpin_page(bp, i, &hints[i], true);
+        bpool_unpin_page(bp, i, true);
     }
 
     // Clear clock bits to make eviction deterministic
@@ -369,12 +355,11 @@ void test_eviction_writes_back_dirty_page(void) {
     }
 
     // Fetch new page - should evict and write back
-    u32 new_hint = 0;
-    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, &new_hint, LATCH_SHARED);
+    struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(new_frame);
 
     rwsx_unlock(&new_frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, POOL_SIZE, &new_hint, false);
+    bpool_unpin_page(bp, POOL_SIZE, false);
 
     // Verify one of the evicted pages was written back
     // (We don't know which one, but at least one should have correct data)
@@ -405,28 +390,24 @@ void test_eviction_writes_back_dirty_page(void) {
 // HINT OPTIMIZATION TESTS
 // =============================================================================
 
-void test_hint_speeds_up_lookup(void) {
+void test_hash_lookup_consistency(void) {
     struct PageStore *ps = pstore_create(NULL, 100);
     struct BufPool *bp = bpool_init(ps);
 
     // Fetch page 50
-    u32 hint = 0;
-    struct PageFrame *frame1 = bpool_fetch_page(bp, 50, &hint, LATCH_SHARED);
+    struct PageFrame *frame1 = bpool_fetch_page(bp, 50, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame1);
-    u32 saved_hint = hint;
 
     rwsx_unlock(&frame1->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 50, &hint, false);
+    bpool_unpin_page(bp, 50, false);
 
-    // Fetch again with saved hint
-    hint = saved_hint;
-    struct PageFrame *frame2 = bpool_fetch_page(bp, 50, &hint, LATCH_SHARED);
+    // Fetch again - should get same frame via hashtable lookup
+    struct PageFrame *frame2 = bpool_fetch_page(bp, 50, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame2);
     TEST_ASSERT_EQUAL(frame1, frame2);
-    TEST_ASSERT_EQUAL(saved_hint, hint);
 
     rwsx_unlock(&frame2->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 50, &hint, false);
+    bpool_unpin_page(bp, 50, false);
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -441,23 +422,22 @@ void test_fetch_with_different_latch_modes(void) {
     struct BufPool *bp = bpool_init(ps);
 
     // Fetch with S-latch
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(bp, 0, &hint, LATCH_SHARED);
+    struct PageFrame *frame = bpool_fetch_page(bp, 0, LATCH_SHARED);
     TEST_ASSERT_NOT_NULL(frame);
     rwsx_unlock(&frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 0, &hint, false);
+    bpool_unpin_page(bp, 0, false);
 
     // Fetch with SX-latch
-    frame = bpool_fetch_page(bp, 1, &hint, LATCH_SHARED_EXCLUSIVE);
+    frame = bpool_fetch_page(bp, 1, LATCH_SHARED_EXCLUSIVE);
     TEST_ASSERT_NOT_NULL(frame);
     rwsx_unlock(&frame->latch, LATCH_SHARED_EXCLUSIVE);
-    bpool_unpin_page(bp, 1, &hint, false);
+    bpool_unpin_page(bp, 1, false);
 
     // Fetch with X-latch
-    frame = bpool_fetch_page(bp, 2, &hint, LATCH_EXCLUSIVE);
+    frame = bpool_fetch_page(bp, 2, LATCH_EXCLUSIVE);
     TEST_ASSERT_NOT_NULL(frame);
     rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-    bpool_unpin_page(bp, 2, &hint, false);
+    bpool_unpin_page(bp, 2, false);
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -478,8 +458,7 @@ void *concurrent_reader(void *arg) {
     struct concurrent_reader_args *args = (struct concurrent_reader_args *) arg;
 
     for (u32 i = 0; i < args->read_count; i++) {
-        u32 hint = 0;
-        struct PageFrame *frame = bpool_fetch_page(args->bp, args->page_num, &hint, LATCH_SHARED);
+        struct PageFrame *frame = bpool_fetch_page(args->bp, args->page_num, LATCH_SHARED);
 
         if (frame == NULL) {
             args->result = -1;
@@ -491,7 +470,7 @@ void *concurrent_reader(void *arg) {
         (void) dummy;
 
         rwsx_unlock(&frame->latch, LATCH_SHARED);
-        bpool_unpin_page(args->bp, args->page_num, &hint, false);
+        bpool_unpin_page(args->bp, args->page_num, false);
     }
 
     args->result = 0;
@@ -564,14 +543,13 @@ void test_destroy_flushes_dirty_pages(void) {
 
     // Modify several pages
     for (u32 i = 0; i < 10; i++) {
-        u32 hint = 0;
-        struct PageFrame *frame = bpool_fetch_page(bp, i, &hint, LATCH_EXCLUSIVE);
+        struct PageFrame *frame = bpool_fetch_page(bp, i, LATCH_EXCLUSIVE);
         TEST_ASSERT_NOT_NULL(frame);
 
         fill_page_with_pattern(frame->data, i, 0x55);
 
         rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-        bpool_unpin_page(bp, i, &hint, true);
+        bpool_unpin_page(bp, i, true);
     }
 
     // Destroy (should flush all dirty pages)
@@ -602,7 +580,6 @@ struct concurrent_cold_load_args {
     u32 page_num;
     pthread_barrier_t *barrier;
     struct PageFrame *result_frame;
-    u32 hint;
     i32 result;
 };
 
@@ -613,7 +590,7 @@ void *concurrent_cold_loader(void *arg) {
     pthread_barrier_wait(args->barrier);
 
     // Both threads try to fetch the same cold page simultaneously
-    args->result_frame = bpool_fetch_page(args->bp, args->page_num, &args->hint, LATCH_SHARED);
+    args->result_frame = bpool_fetch_page(args->bp, args->page_num, LATCH_SHARED);
 
     if (args->result_frame == NULL) {
         args->result = -1;
@@ -636,10 +613,9 @@ void test_concurrent_cold_load_same_page_no_duplicate(void) {
     struct BufPool *bp = bpool_init(ps);
     TEST_ASSERT_NOT_NULL(bp);
 
-    // Verify page 42 is not in buffer pool
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        TEST_ASSERT_NOT_EQUAL(42, LOAD(&bp->tlb[i], RELAXED));
-    }
+    // Verify page 42 is not in buffer pool (hashtable should not find it)
+    u32 temp_idx;
+    TEST_ASSERT_NOT_EQUAL(0, sht_get(bp->index, 42, &temp_idx));
 
     // Set up barrier for synchronization
     pthread_barrier_t barrier;
@@ -648,9 +624,9 @@ void test_concurrent_cold_load_same_page_no_duplicate(void) {
     // Create two threads that will race to load page 42
     pthread_t thread1, thread2;
     struct concurrent_cold_load_args args1 = {
-            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .hint = 0, .result = -1};
+            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .result = -1};
     struct concurrent_cold_load_args args2 = {
-            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .hint = 0, .result = -1};
+            .bp = bp, .page_num = 42, .barrier = &barrier, .result_frame = NULL, .result = -1};
 
     pthread_create(&thread1, NULL, concurrent_cold_loader, &args1);
     pthread_create(&thread2, NULL, concurrent_cold_loader, &args2);
@@ -670,30 +646,25 @@ void test_concurrent_cold_load_same_page_no_duplicate(void) {
     // Verify data is correct
     verify_page_pattern(args1.result_frame->data, 42, 0x88);
 
-    // Verify only ONE TLB entry exists for page 42
-    u32 tlb_count = 0;
-    u32 found_idx = INVALID_PAGE;
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        if (LOAD(&bp->tlb[i], RELAXED) == 42) {
-            tlb_count++;
-            found_idx = i;
-        }
-    }
-    TEST_ASSERT_EQUAL(1, tlb_count);
-    TEST_ASSERT_NOT_EQUAL(INVALID_PAGE, found_idx);
+    // Verify page 42 is now in index (hashtable lookup should succeed)
+    u32 frame_idx;
+    TEST_ASSERT_EQUAL(0, sht_get(bp->index, 42, &frame_idx));
 
-    // Verify the frame is at the TLB index we found
-    TEST_ASSERT_EQUAL_PTR(&bp->frames[found_idx], args1.result_frame);
+    // Verify TLB entry matches
+    TEST_ASSERT_EQUAL(42, LOAD(&bp->tlb[frame_idx], RELAXED));
+
+    // Verify the frame is at the index we found
+    TEST_ASSERT_EQUAL_PTR(&bp->frames[frame_idx], args1.result_frame);
 
     // Pin count should be 2 (one from each thread)
     TEST_ASSERT_EQUAL(2, LOAD(&args1.result_frame->pin_cnt, RELAXED));
 
     // Cleanup: unlock and unpin from both threads
     rwsx_unlock(&args1.result_frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 42, &args1.hint, false);
+    bpool_unpin_page(bp, 42, false);
 
     rwsx_unlock(&args2.result_frame->latch, LATCH_SHARED);
-    bpool_unpin_page(bp, 42, &args2.hint, false);
+    bpool_unpin_page(bp, 42, false);
 
     TEST_ASSERT_EQUAL(0, LOAD(&args1.result_frame->pin_cnt, RELAXED));
 
@@ -714,8 +685,7 @@ void *slow_writer_thread(void *arg) {
     struct concurrent_write_flush_args *args = (struct concurrent_write_flush_args *) arg;
 
     // Fetch page with X-latch
-    u32 hint = 0;
-    struct PageFrame *frame = bpool_fetch_page(args->bp, args->page_num, &hint, LATCH_EXCLUSIVE);
+    struct PageFrame *frame = bpool_fetch_page(args->bp, args->page_num, LATCH_EXCLUSIVE);
     if (frame == NULL) {
         args->result = -1;
         return NULL;
@@ -739,7 +709,7 @@ void *slow_writer_thread(void *arg) {
 
     // Unpin as dirty
     rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-    bpool_unpin_page(args->bp, args->page_num, &hint, true);
+    bpool_unpin_page(args->bp, args->page_num, true);
 
     args->result = 0;
     return NULL;
@@ -759,8 +729,7 @@ void *concurrent_flusher_thread(void *arg) {
     // Try to flush while writer is still writing
     // WITHOUT the fix: reads torn data (mix of 0x00 and 0xFF)
     // WITH the fix: blocks on frame S-latch until writer finishes
-    u32 hint = 0;
-    bpool_flush_page(args->bp, args->page_num, &hint);
+    bpool_flush_page(args->bp, args->page_num);
 
     args->result = 0;
     return NULL;
@@ -915,8 +884,8 @@ int main(void) {
     RUN_TEST(test_eviction_skips_pinned_pages);
     RUN_TEST(test_eviction_writes_back_dirty_page);
 
-    // Hint optimization
-    RUN_TEST(test_hint_speeds_up_lookup);
+    // Hash lookup
+    RUN_TEST(test_hash_lookup_consistency);
 
     // Latching
     RUN_TEST(test_fetch_with_different_latch_modes);

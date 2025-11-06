@@ -11,6 +11,16 @@
 #include <time.h>
 #include <unistd.h>
 
+u32 fnv1a_32(const u8 *data, size_t len) {
+    u32 hash = 0x811c9dc5; // FNV-1a 32-bit offset_basis
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193;
+    }
+
+    return hash;
+}
+
 void logger(FILE *f, const char *tag, const char *format, ...) {
 #ifdef LOGGING
     struct timespec tp;

@@ -22,6 +22,7 @@ typedef int64_t i64;
 
 void logger(FILE *f, const char *tag, const char *format, ...);
 i32 open_relative(const char *path, i32 flag, mode_t mode);
+u32 fnv1a_32(const u8 *data, size_t len);
 
 // Atomics
 typedef _Atomic(u8) atomic_u8;
