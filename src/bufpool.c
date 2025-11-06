@@ -132,6 +132,10 @@ void bpool_flush_all(struct BufPool *bp) {
 void bpool_destroy(struct BufPool *bp) {
     bpool_flush_all(bp);
 
+    for (u32 i = 0; i < POOL_SIZE; i++) {
+        rwsx_destroy(&bp->frames[i].latch);
+    }
+
     rwsx_destroy(&bp->latch);
 
     free(bp);
