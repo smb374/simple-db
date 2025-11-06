@@ -114,16 +114,7 @@ void bpool_flush_all(struct BufPool *bp) {
 }
 
 void bpool_destroy(struct BufPool *bp) {
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        u32 page_num = LOAD(&bp->tlb[i], ACQUIRE);
-        if (page_num != INVALID_PAGE) {
-            struct PageFrame *frame = &bp->frames[i];
-            if (LOAD(&frame->is_dirty, ACQUIRE)) {
-                pstore_write(bp->store, page_num, frame->data);
-            }
-            rwsx_destroy(&frame->latch);
-        }
-    }
+    bpool_flush_all(bp);
 
     rwsx_destroy(&bp->latch);
 
