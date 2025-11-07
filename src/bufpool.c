@@ -147,8 +147,8 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
             break;
 
         struct FNode *fn = container_of(n, struct FNode, node);
-        u32 fidx = fn->fidx;
-        struct PageFrame *frame = &bp->frames[fidx];
+        u32 frame_idx = fn->fidx;
+        struct PageFrame *frame = &bp->frames[frame_idx];
 
         if (LOAD(&frame->visited, ACQUIRE)) {
             cq_put(&bp->main, &fn->node);
@@ -157,9 +157,8 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
             if (LOAD(&frame->pin_cnt, ACQUIRE) > 0) {
                 cq_put(&bp->qd, &fn->node);
                 continue;
-            } else {
-                return fidx;
             }
+            return frame_idx;
         }
     }
 
@@ -173,11 +172,17 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
         u32 frame_idx = fn->fidx;
         struct PageFrame *frame = &bp->frames[frame_idx];
 
-        if (LOAD(&frame->pin_cnt, ACQUIRE) == 0) {
+        if (LOAD(&frame->visited, ACQUIRE)) {
+            STORE(&frame->visited, false, RELEASE);
+            cq_put(&bp->main, &fn->node);
+            continue;
+        } else {
+            if (LOAD(&frame->pin_cnt, ACQUIRE) > 0) {
+                cq_put(&bp->main, &fn->node);
+                continue;
+            }
             return frame_idx;
         }
-
-        cq_put(&bp->main, &fn->node);
     }
 
     return INVALID_PAGE;
