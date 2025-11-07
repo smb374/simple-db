@@ -2,6 +2,7 @@ inc = include_directories('../include')
 
 db_srcs = [
   './bufpool.c',
+  './cqueue.c',
   './pagestore.c',
   './rwsxlock.c',
   './shtable.c',

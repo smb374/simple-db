@@ -3,6 +3,7 @@
 
 #include <fcntl.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -19,6 +20,7 @@ typedef int64_t i64;
 #define IS_POW_2(n) (((n) > 0) && (((n) & ((n) - 1)) == 0))
 #define MIN(x, y) ((y) ^ (((x) ^ (y)) & -((x) < (y))))
 #define MAX(x, y) ((x) ^ (((x) ^ (y)) & -((x) < (y))))
+#define container_of(ptr, T, member) ((T *) ((u8 *) (ptr) - offsetof(T, member)))
 
 void logger(FILE *f, const char *tag, const char *format, ...);
 i32 open_relative(const char *path, i32 flag, mode_t mode);

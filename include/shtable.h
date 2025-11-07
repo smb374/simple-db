@@ -13,7 +13,7 @@ struct Entry {
 struct SHTable {
     struct Entry *entries;
     atomic_u32 size;
-    u32 mask;
+    u32 cap;
 };
 
 struct SHTable *sht_init(u32 cap);

@@ -6,11 +6,9 @@
 #include "utils.h"
 
 struct SHTable *sht_init(u32 cap) {
-    assert(IS_POW_2(cap));
-
     struct SHTable *t = calloc(1, sizeof(struct SHTable));
     t->entries = calloc(cap, sizeof(struct Entry));
-    t->mask = cap - 1;
+    t->cap = cap;
 
     for (u32 i = 0; i < cap; i++) {
         t->entries[i].key = EMPTY;
@@ -33,8 +31,8 @@ i32 sht_get(struct SHTable *t, u32 key, u32 *val_out) {
     store32be(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
-    for (u32 i = 0; i <= t->mask; i++) {
-        u32 idx = (hash + i) & t->mask;
+    for (u32 i = 0; i < t->cap; i++) {
+        u32 idx = (hash + i) % t->cap;
         u32 pkey = LOAD(&t->entries[idx].key, ACQUIRE);
 
         if (pkey == key) {
@@ -56,8 +54,8 @@ i32 sht_set(struct SHTable *t, u32 key, u32 val) {
     store32be(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
-    for (u32 i = 0; i <= t->mask; i++) {
-        u32 idx = (hash + i) & t->mask;
+    for (u32 i = 0; i < t->cap; i++) {
+        u32 idx = (hash + i) % t->cap;
         u32 pkey = LOAD(&t->entries[idx].key, ACQUIRE);
 
         if (pkey == key) {
@@ -89,8 +87,8 @@ i32 sht_unset(struct SHTable *t, u32 key) {
     store32be(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
-    for (u32 i = 0; i <= t->mask; i++) {
-        u32 idx = (hash + i) & t->mask;
+    for (u32 i = 0; i < t->cap; i++) {
+        u32 idx = (hash + i) % t->cap;
         u32 pkey = LOAD(&t->entries[idx].key, ACQUIRE);
 
         if (pkey == key) {

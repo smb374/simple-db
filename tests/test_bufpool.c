@@ -74,7 +74,7 @@ void test_fetch_page_cold_load(void) {
 
     // Verify frame state
     TEST_ASSERT_EQUAL(1, LOAD(&frame->pin_cnt, RELAXED));
-    TEST_ASSERT_EQUAL(1, LOAD(&frame->clock_bit, RELAXED));
+    // TEST_ASSERT_EQUAL(1, LOAD(&frame->clock_bit, RELAXED));
     TEST_ASSERT_FALSE(LOAD(&frame->is_dirty, RELAXED));
 
     // Verify page is in index and TLB
@@ -305,9 +305,9 @@ void test_eviction_skips_pinned_pages(void) {
     }
 
     // Keep all pages pinned, clear clock bits
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        STORE(&frames[i]->clock_bit, 0, RELAXED);
-    }
+    // for (u32 i = 0; i < POOL_SIZE; i++) {
+    //     STORE(&frames[i]->clock_bit, 0, RELAXED);
+    // }
 
     // Try to fetch a new page - should fail (all pinned)
     struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
@@ -350,9 +350,9 @@ void test_eviction_writes_back_dirty_page(void) {
     }
 
     // Clear clock bits to make eviction deterministic
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        STORE(&bp->frames[i].clock_bit, 0, RELAXED);
-    }
+    // for (u32 i = 0; i < POOL_SIZE; i++) {
+    //     STORE(&bp->frames[i].clock_bit, 0, RELAXED);
+    // }
 
     // Fetch new page - should evict and write back
     struct PageFrame *new_frame = bpool_fetch_page(bp, POOL_SIZE, LATCH_SHARED);
