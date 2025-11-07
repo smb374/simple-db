@@ -10,7 +10,7 @@
 #include "utils.h"
 
 #define POOL_SIZE 8192
-#define QD_SIZE (POOL_SIZE / 10)
+#define QD_SIZE (POOL_SIZE / 8)
 #define MAIN_SIZE (POOL_SIZE - QD_SIZE)
 
 enum QueueType {

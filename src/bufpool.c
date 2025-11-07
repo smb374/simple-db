@@ -151,6 +151,7 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
         struct PageFrame *frame = &bp->frames[frame_idx];
 
         if (LOAD(&frame->visited, ACQUIRE)) {
+            STORE(&frame->visited, false, RELEASE);
             cq_put(&bp->main, &fn->node);
             continue;
         } else {
@@ -209,6 +210,10 @@ static void reclaim_ghost(struct BufPool *bp) {
 }
 
 static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
+    if (page_num == INVALID_PAGE || page_num * PAGE_SIZE >= bp->store->store_size) {
+        return NULL;
+    }
+    u8 target_queue;
     rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
     // Double-check: page might have been loaded by another thread
@@ -232,14 +237,9 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
 
     struct PageFrame *frame = &bp->frames[victim];
     u32 old_page = LOAD(&bp->tlb[victim], ACQUIRE);
+    u8 old_qtype = LOAD(&frame->qtype, ACQUIRE);
 
-    // Flush dirty victim
-    if (old_page != INVALID_PAGE && LOAD(&frame->is_dirty, ACQUIRE)) {
-        pstore_write(bp->store, old_page, frame->data);
-    }
-
-    // If evicting from A1, add to ghost list
-    if (old_page != INVALID_PAGE && LOAD(&frame->qtype, ACQUIRE) == QUEUE_QD) {
+    if (old_page != INVALID_PAGE && old_qtype == QUEUE_QD) {
         reclaim_ghost(bp);
         struct GNode *gn = find_free_ghost(bp);
         if (gn) {
@@ -249,37 +249,41 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
         }
     }
 
-    // Load new page
-    u8 buf[PAGE_SIZE];
-    memset(buf, 0, PAGE_SIZE);
-    if (pstore_read(bp->store, page_num, buf) < 0) {
-        rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-        return NULL;
-    }
-    memcpy(frame->data, buf, PAGE_SIZE);
-
-    // Update metadata
+    STORE(&frame->pin_cnt, 1, RELEASE);
     if (old_page != INVALID_PAGE) {
         sht_unset(bp->index, old_page);
     }
+    STORE(&bp->tlb[victim], INVALID_PAGE, RELEASE);
+    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
-    STORE(&frame->pin_cnt, 1, RELEASE);
-    STORE(&frame->is_dirty, false, RELEASE);
-    STORE(&frame->visited, false, RELEASE);
+    bool was_dirty = (old_page != INVALID_PAGE) && LOAD(&frame->is_dirty, ACQUIRE);
 
-    u8 target_queue;
     if (in_ghost) {
         target_queue = QUEUE_MAIN;
         sht_unset(bp->gindex, page_num);
     } else {
         target_queue = QUEUE_QD;
     }
+
+    rwsx_lock(&frame->latch, LATCH_EXCLUSIVE);
+
+    if (was_dirty) {
+        pstore_write(bp->store, old_page, frame->data);
+    }
+
+    u8 buf[PAGE_SIZE];
+    if (pstore_read(bp->store, page_num, buf) < 0) {
+        STORE(&frame->pin_cnt, 0, RELEASE);
+        rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
+        cq_put(&bp->qd, &bp->fnodes[victim].node);
+
+        return NULL;
+    }
+    memcpy(frame->data, buf, PAGE_SIZE);
+
+    STORE(&frame->is_dirty, false, RELEASE);
+    STORE(&frame->visited, false, RELEASE);
     STORE(&frame->qtype, target_queue, RELEASE);
-
-    sht_set(bp->index, page_num, victim);
-    STORE(&bp->tlb[victim], page_num, RELEASE);
-
-    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
     if (target_queue == QUEUE_MAIN) {
         cq_put(&bp->main, &bp->fnodes[victim].node);
@@ -287,7 +291,26 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
         cq_put(&bp->qd, &bp->fnodes[victim].node);
     }
 
-    rwsx_lock(&frame->latch, mode);
+    rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+    sht_set(bp->index, page_num, victim); // Visible to index
+    STORE(&bp->tlb[victim], page_num, RELEASE); // Visible to TLB
+    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+
+    switch (mode) {
+        case LATCH_SHARED:
+            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
+            rwsx_lock(&frame->latch, LATCH_SHARED);
+            break;
+        case LATCH_SHARED_EXCLUSIVE:
+            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
+            rwsx_lock(&frame->latch, LATCH_SHARED_EXCLUSIVE);
+            break;
+        case LATCH_EXCLUSIVE:
+            break;
+        default:
+            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
+            break;
+    }
 
     return frame;
 }
