@@ -1,5 +1,6 @@
 #include "bufpool.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,13 +10,21 @@
 #include "shtable.h"
 #include "utils.h"
 
-static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchMode mode);
+static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num);
+
+static struct FrameHandle *create_handle(struct FrameData *fdata, const u32 epoch, const u32 frame_idx,
+                                         const u32 page_num) {
+    struct FrameHandle *h = calloc(1, sizeof(struct FrameHandle));
+
+    h->fdata = fdata;
+    h->epoch = epoch;
+    h->frame_idx = frame_idx;
+    h->page_num = page_num;
+    return h;
+}
 
 struct BufPool *bpool_init(struct PageStore *store) {
     struct BufPool *bp = calloc(1, sizeof(struct BufPool) + sizeof(u32) * POOL_SIZE);
-
-    bp->tlb = (void *) bp->data;
-    memset(bp->tlb, 0xFF, sizeof(u32) * POOL_SIZE);
 
     bp->store = store;
     bp->index = sht_init(POOL_SIZE + PAGE_SIZE / 2); // MAX load factor = 75%
@@ -24,7 +33,7 @@ struct BufPool *bpool_init(struct PageStore *store) {
     bp->fnodes = calloc(POOL_SIZE, sizeof(struct FNode));
     bp->gnodes = calloc(POOL_SIZE, sizeof(struct GNode));
 
-    bp->tlb_cursor = 0;
+    bp->warmup_cursor = 0;
     cq_init(&bp->qd, QD_SIZE);
     cq_init(&bp->main, MAIN_SIZE);
     cq_init(&bp->ghost, POOL_SIZE);
@@ -32,7 +41,8 @@ struct BufPool *bpool_init(struct PageStore *store) {
     rwsx_init(&bp->latch);
 
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        rwsx_init(&bp->frames[i].latch);
+        rwsx_init(&bp->frames[i].fdata.latch);
+        bp->frames[i].page_num = INVALID_PAGE;
         bp->gnodes[i].page_num = INVALID_PAGE;
         bp->gnodes[i].gidx = i;
         bp->fnodes[i].fidx = i;
@@ -41,82 +51,11 @@ struct BufPool *bpool_init(struct PageStore *store) {
     return bp;
 }
 
-struct PageFrame *bpool_fetch_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
-    rwsx_lock(&bp->latch, LATCH_SHARED);
-    u32 frame_idx;
-    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
-        struct PageFrame *frame = &bp->frames[frame_idx];
-
-        FADD(&frame->pin_cnt, 1, RELEASE);
-        STORE(&frame->visited, true, RELEASE);
-
-        rwsx_unlock(&bp->latch, LATCH_SHARED);
-        rwsx_lock(&frame->latch, mode);
-        return frame;
-    }
-
-    rwsx_unlock(&bp->latch, LATCH_SHARED);
-    return cold_load_page(bp, page_num, mode);
-}
-
-void bpool_unpin_page(struct BufPool *bp, u32 page_num, bool is_dirty) {
-    u32 frame_idx;
-    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
-        struct PageFrame *frame = &bp->frames[frame_idx];
-
-        if (is_dirty) {
-            STORE(&frame->is_dirty, true, RELEASE);
-        }
-        FSUB(&frame->pin_cnt, 1, RELEASE);
-    }
-}
-
-void bpool_flush_page(struct BufPool *bp, u32 page_num) {
-    rwsx_lock(&bp->latch, LATCH_SHARED);
-    u32 frame_idx;
-    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
-        struct PageFrame *frame = &bp->frames[frame_idx];
-        FADD(&frame->pin_cnt, 1, RELEASE); // tmp pin.
-        rwsx_unlock(&bp->latch, LATCH_SHARED);
-        rwsx_lock(&frame->latch, LATCH_SHARED);
-
-        if (LOAD(&frame->is_dirty, ACQUIRE)) {
-            pstore_write(bp->store, page_num, frame->data);
-            STORE(&frame->is_dirty, false, RELEASE);
-        }
-
-        rwsx_unlock(&frame->latch, LATCH_SHARED);
-        FSUB(&frame->pin_cnt, 1, RELEASE);
-        return;
-    }
-    rwsx_unlock(&bp->latch, LATCH_SHARED);
-}
-
-void bpool_flush_all(struct BufPool *bp) {
-    rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        u32 page_num = LOAD(&bp->tlb[i], ACQUIRE);
-        if (page_num != INVALID_PAGE) {
-            struct PageFrame *frame = &bp->frames[i];
-
-            rwsx_lock(&frame->latch, LATCH_SHARED);
-
-            if (LOAD(&frame->is_dirty, ACQUIRE)) {
-                pstore_write(bp->store, page_num, frame->data);
-                STORE(&frame->is_dirty, false, RELEASE);
-            }
-
-            rwsx_unlock(&frame->latch, LATCH_SHARED);
-        }
-    }
-    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-}
-
 void bpool_destroy(struct BufPool *bp) {
     bpool_flush_all(bp);
 
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        rwsx_destroy(&bp->frames[i].latch);
+        rwsx_destroy(&bp->frames[i].fdata.latch);
     }
 
     rwsx_destroy(&bp->latch);
@@ -131,15 +70,141 @@ void bpool_destroy(struct BufPool *bp) {
     free(bp);
 }
 
-static u32 find_victim_qdlp(struct BufPool *bp) {
-    u32 start = LOAD(&bp->tlb_cursor, ACQUIRE);
-    for (u32 i = start; i < POOL_SIZE; i++) {
-        if (LOAD(&bp->tlb[i], ACQUIRE) == INVALID_PAGE) {
-            STORE(&bp->tlb_cursor, i + 1, RELEASE);
-            return i;
+struct FrameHandle *bpool_fetch_page(struct BufPool *bp, u32 page_num) {
+    if (page_num == INVALID_PAGE) {
+        return NULL;
+    }
+    rwsx_lock(&bp->latch, LATCH_SHARED);
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        struct PageFrame *frame = &bp->frames[frame_idx];
+
+        // Pin first
+        FADD(&frame->pin_cnt, 1, RELEASE);
+        // Memory barrier to ensure pin is visible before epoch read
+        atomic_thread_fence(memory_order_acquire);
+
+        u32 epoch = LOAD(&frame->epoch, ACQUIRE);
+        u32 current_page = LOAD(&frame->page_num, ACQUIRE);
+
+        // Verify page still matches
+        if (current_page != page_num) {
+            // Page was evicted between lookup and pin
+            FSUB(&frame->pin_cnt, 1, RELEASE);
+            rwsx_unlock(&bp->latch, LATCH_SHARED);
+            // Retry as cold load
+            return bpool_fetch_page(bp, page_num); // Tail recursion
         }
+
+        STORE(&frame->visited, true, RELEASE);
+        rwsx_unlock(&bp->latch, LATCH_SHARED);
+        return create_handle(&frame->fdata, epoch, frame_idx, page_num);
     }
 
+    rwsx_unlock(&bp->latch, LATCH_SHARED);
+    struct PageFrame *frame = cold_load_page(bp, page_num);
+    if (frame) {
+        frame_idx = frame - bp->frames;
+        return create_handle(&frame->fdata, LOAD(&frame->epoch, ACQUIRE), frame_idx, page_num);
+    }
+    return NULL;
+}
+
+i32 bpool_mark_read(struct BufPool *bp, struct FrameHandle *h) {
+    struct PageFrame *frame = &bp->frames[h->frame_idx];
+
+    if (LOAD(&frame->epoch, ACQUIRE) != h->epoch) {
+        return -1;
+    }
+
+    STORE(&frame->visited, true, RELEASE);
+
+    return 0;
+}
+
+i32 bpool_mark_write(struct BufPool *bp, struct FrameHandle *h) {
+    struct PageFrame *frame = &bp->frames[h->frame_idx];
+
+    if (LOAD(&frame->epoch, ACQUIRE) != h->epoch) {
+        return -1;
+    }
+
+    STORE(&frame->visited, true, RELEASE);
+    STORE(&frame->is_dirty, true, RELEASE);
+
+    return 0;
+}
+
+i32 bpool_release_handle(struct BufPool *bp, struct FrameHandle *h) {
+    struct PageFrame *frame = &bp->frames[h->frame_idx];
+
+    if (LOAD(&frame->epoch, ACQUIRE) != h->epoch) {
+        return -1;
+    }
+
+    FSUB(&frame->pin_cnt, 1, RELEASE);
+    free(h);
+
+    return 0;
+}
+
+i32 bpool_flush_page(struct BufPool *bp, u32 page_num) {
+    if (page_num == INVALID_PAGE) {
+        return -1;
+    }
+    rwsx_lock(&bp->latch, LATCH_SHARED);
+    u32 frame_idx;
+    if (sht_get(bp->index, page_num, &frame_idx) != -1) {
+        i32 ret = 0;
+        struct PageFrame *frame = &bp->frames[frame_idx];
+        FADD(&frame->pin_cnt, 1, RELEASE); // tmp pin.
+        rwsx_unlock(&bp->latch, LATCH_SHARED);
+        rwsx_lock(&frame->fdata.latch, LATCH_SHARED);
+
+        if (LOAD(&frame->is_dirty, ACQUIRE)) {
+            if (pstore_write(bp->store, page_num, frame->fdata.data) < 0) {
+                rwsx_unlock(&frame->fdata.latch, LATCH_SHARED);
+                return -1;
+            }
+            STORE(&frame->is_dirty, false, RELEASE);
+        }
+
+        rwsx_unlock(&frame->fdata.latch, LATCH_SHARED);
+        FSUB(&frame->pin_cnt, 1, RELEASE);
+        return ret;
+    }
+    rwsx_unlock(&bp->latch, LATCH_SHARED);
+    return -1;
+}
+
+i32 bpool_flush_all(struct BufPool *bp) {
+    rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+    for (u32 i = 0; i < POOL_SIZE; i++) {
+        u32 page_num = LOAD(&bp->frames[i].page_num, ACQUIRE);
+        if (page_num != INVALID_PAGE) {
+            struct PageFrame *frame = &bp->frames[i];
+
+            rwsx_lock(&frame->fdata.latch, LATCH_SHARED);
+
+            if (LOAD(&frame->is_dirty, ACQUIRE)) {
+                if (pstore_write(bp->store, page_num, frame->fdata.data) < 0) {
+                    rwsx_unlock(&frame->fdata.latch, LATCH_SHARED);
+                    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+
+                    return -1;
+                }
+                STORE(&frame->is_dirty, false, RELEASE);
+            }
+
+            rwsx_unlock(&frame->fdata.latch, LATCH_SHARED);
+        }
+    }
+    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+    return 0;
+}
+
+static u32 find_victim_qdlp(struct BufPool *bp) {
+    // Check QD first
     u32 qd_size = cq_size(&bp->qd);
     for (u32 i = 0; i < qd_size; i++) {
         struct CNode *n = cq_pop(&bp->qd);
@@ -160,6 +225,14 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
                 continue;
             }
             return frame_idx;
+        }
+    }
+
+    u32 start = LOAD(&bp->warmup_cursor, ACQUIRE);
+    for (u32 i = start; i < POOL_SIZE; i++) {
+        if (LOAD(&bp->frames[i].page_num, ACQUIRE) == INVALID_PAGE) {
+            STORE(&bp->warmup_cursor, i + 1, RELEASE);
+            return i;
         }
     }
 
@@ -191,7 +264,7 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
 
 static struct GNode *find_free_ghost(struct BufPool *bp) {
     for (u32 i = 0; i < POOL_SIZE; i++) {
-        if (bp->gnodes[i].page_num == INVALID_PAGE) {
+        if (LOAD(&bp->gnodes[i].page_num, ACQUIRE) == INVALID_PAGE) {
             return &bp->gnodes[i];
         }
     }
@@ -199,21 +272,23 @@ static struct GNode *find_free_ghost(struct BufPool *bp) {
 }
 
 static void reclaim_ghost(struct BufPool *bp) {
-    if (cq_size(&bp->ghost) >= POOL_SIZE) {
+    if (cq_size(&bp->ghost) > POOL_SIZE) {
         struct CNode *n = cq_pop(&bp->ghost);
         if (n) {
             struct GNode *gn = container_of(n, struct GNode, node);
             sht_unset(bp->gindex, gn->page_num);
-            gn->page_num = INVALID_PAGE; // Mark as free
+            STORE(&gn->page_num, INVALID_PAGE, RELEASE);
         }
     }
 }
 
-static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
-    if (page_num == INVALID_PAGE || page_num * PAGE_SIZE >= bp->store->store_size) {
+static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
+    if (page_num * PAGE_SIZE >= bp->store->store_size) {
         return NULL;
     }
+
     u8 target_queue;
+
     rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
     // Double-check: page might have been loaded by another thread
@@ -222,7 +297,6 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
         struct PageFrame *frame = &bp->frames[frame_idx];
         FADD(&frame->pin_cnt, 1, RELEASE);
         rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-        rwsx_lock(&frame->latch, mode);
         return frame;
     }
 
@@ -236,14 +310,14 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
     }
 
     struct PageFrame *frame = &bp->frames[victim];
-    u32 old_page = LOAD(&bp->tlb[victim], ACQUIRE);
+    u32 old_page = LOAD(&frame->page_num, ACQUIRE);
     u8 old_qtype = LOAD(&frame->qtype, ACQUIRE);
 
     if (old_page != INVALID_PAGE && old_qtype == QUEUE_QD) {
         reclaim_ghost(bp);
         struct GNode *gn = find_free_ghost(bp);
         if (gn) {
-            gn->page_num = old_page;
+            STORE(&gn->page_num, old_page, RELEASE);
             sht_set(bp->gindex, old_page, gn->gidx);
             cq_put(&bp->ghost, &gn->node);
         }
@@ -252,8 +326,9 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
     STORE(&frame->pin_cnt, 1, RELEASE);
     if (old_page != INVALID_PAGE) {
         sht_unset(bp->index, old_page);
+        FADD(&frame->epoch, 1, RELEASE);
     }
-    STORE(&bp->tlb[victim], INVALID_PAGE, RELEASE);
+    STORE(&frame->page_num, INVALID_PAGE, RELEASE);
     rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
     bool was_dirty = (old_page != INVALID_PAGE) && LOAD(&frame->is_dirty, ACQUIRE);
@@ -265,21 +340,20 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
         target_queue = QUEUE_QD;
     }
 
-    rwsx_lock(&frame->latch, LATCH_EXCLUSIVE);
+    rwsx_lock(&frame->fdata.latch, LATCH_EXCLUSIVE);
 
     if (was_dirty) {
-        pstore_write(bp->store, old_page, frame->data);
+        pstore_write(bp->store, old_page, frame->fdata.data);
     }
 
     u8 buf[PAGE_SIZE];
     if (pstore_read(bp->store, page_num, buf) < 0) {
-        STORE(&frame->pin_cnt, 0, RELEASE);
-        rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-        cq_put(&bp->qd, &bp->fnodes[victim].node);
-
-        return NULL;
+        int err = errno;
+        error_logger(stderr, err, "Failed to read in-range page %u at offset %lu\n", page_num,
+                     (u64) page_num * PAGE_SIZE);
+        abort();
     }
-    memcpy(frame->data, buf, PAGE_SIZE);
+    memcpy(frame->fdata.data, buf, PAGE_SIZE);
 
     STORE(&frame->is_dirty, false, RELEASE);
     STORE(&frame->visited, false, RELEASE);
@@ -292,25 +366,11 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num, LatchM
     }
 
     rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+    STORE(&frame->page_num, page_num, RELEASE);
     sht_set(bp->index, page_num, victim); // Visible to index
-    STORE(&bp->tlb[victim], page_num, RELEASE); // Visible to TLB
     rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
-    switch (mode) {
-        case LATCH_SHARED:
-            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-            rwsx_lock(&frame->latch, LATCH_SHARED);
-            break;
-        case LATCH_SHARED_EXCLUSIVE:
-            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-            rwsx_lock(&frame->latch, LATCH_SHARED_EXCLUSIVE);
-            break;
-        case LATCH_EXCLUSIVE:
-            break;
-        default:
-            rwsx_unlock(&frame->latch, LATCH_EXCLUSIVE);
-            break;
-    }
+    rwsx_unlock(&frame->fdata.latch, LATCH_EXCLUSIVE);
 
     return frame;
 }

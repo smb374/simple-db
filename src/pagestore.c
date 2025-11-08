@@ -147,10 +147,16 @@ FAIL:
 
 i32 pstore_sync(struct PageStore *ps) {
     if (ps->fd != -1) {
-        errno = 0;
-        if (fdatasync(ps->fd) < 0) {
-            logger(stderr, "ERROR", "[pstore_sync] Failed to run fdatasync: %s\n", strerror(errno));
-            return -1;
+        for (;;) {
+            errno = 0;
+            if (fdatasync(ps->fd) < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                logger(stderr, "ERROR", "[pstore_sync] Failed to run fdatasync: %s\n", strerror(errno));
+                return -1;
+            }
+            break;
         }
     }
     return 0;
@@ -163,10 +169,16 @@ i32 pstore_read(struct PageStore *ps, u32 page_num, void *buf) {
     }
 
     if (ps->fd != -1) {
-        errno = 0;
-        if (pread(ps->fd, buf, PAGE_SIZE, (off_t) start) < 0) {
-            logger(stderr, "ERROR", "[pstore_sync] Failed to read data with pread: %s\n", strerror(errno));
-            return -1;
+        for (;;) {
+            errno = 0;
+            if (pread(ps->fd, buf, PAGE_SIZE, (off_t) start) < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                logger(stderr, "ERROR", "[pstore_read] Failed to read data with pread: %s\n", strerror(errno));
+                return -1;
+            }
+            break;
         }
     } else {
         memcpy(buf, (u8 *) ps->mmap_addr + start, PAGE_SIZE);
@@ -181,10 +193,16 @@ i32 pstore_write(struct PageStore *ps, u32 page_num, const void *buf) {
     }
 
     if (ps->fd != -1) {
-        errno = 0;
-        if (pwrite(ps->fd, buf, PAGE_SIZE, (off_t) start) < 0) {
-            logger(stderr, "ERROR", "[pstore_sync] Failed to write data with pwrite: %s\n", strerror(errno));
-            return -1;
+        for (;;) {
+            errno = 0;
+            if (pwrite(ps->fd, buf, PAGE_SIZE, (off_t) start) < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                logger(stderr, "ERROR", "[pstore_write] Failed to write data with pwrite: %s\n", strerror(errno));
+                return -1;
+            }
+            break;
         }
     } else {
         memcpy((u8 *) ps->mmap_addr + start, buf, PAGE_SIZE);

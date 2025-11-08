@@ -22,6 +22,7 @@ typedef int64_t i64;
 #define MAX(x, y) ((x) ^ (((x) ^ (y)) & -((x) < (y))))
 #define container_of(ptr, T, member) ((T *) ((u8 *) (ptr) - offsetof(T, member)))
 
+void error_logger(FILE *f, int err, const char *format, ...);
 void logger(FILE *f, const char *tag, const char *format, ...);
 i32 open_relative(const char *path, i32 flag, mode_t mode);
 u32 fnv1a_32(const u8 *data, size_t len);

@@ -21,6 +21,16 @@ u32 fnv1a_32(const u8 *data, size_t len) {
     return hash;
 }
 
+void error_logger(FILE *f, int err, const char *format, ...) {
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    fprintf(f, "%ld.%ld [ERROR] errno=%d, reason=%s, ", tp.tv_sec, tp.tv_nsec, err, strerror(err));
+    va_list args;
+    va_start(args, format);
+    vfprintf(f, format, args);
+    va_end(args);
+}
+
 void logger(FILE *f, const char *tag, const char *format, ...) {
 #ifdef LOGGING
     struct timespec tp;
