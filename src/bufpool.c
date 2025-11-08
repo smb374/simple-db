@@ -204,7 +204,14 @@ i32 bpool_flush_all(struct BufPool *bp) {
 }
 
 static u32 find_victim_qdlp(struct BufPool *bp) {
-    // Check QD first
+    u32 start = LOAD(&bp->warmup_cursor, ACQUIRE);
+    for (u32 i = start; i < POOL_SIZE; i++) {
+        if (LOAD(&bp->frames[i].page_num, ACQUIRE) == INVALID_PAGE) {
+            STORE(&bp->warmup_cursor, i + 1, RELEASE);
+            return i;
+        }
+    }
+
     u32 qd_size = cq_size(&bp->qd);
     for (u32 i = 0; i < qd_size; i++) {
         struct CNode *n = cq_pop(&bp->qd);
@@ -225,14 +232,6 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
                 continue;
             }
             return frame_idx;
-        }
-    }
-
-    u32 start = LOAD(&bp->warmup_cursor, ACQUIRE);
-    for (u32 i = start; i < POOL_SIZE; i++) {
-        if (LOAD(&bp->frames[i].page_num, ACQUIRE) == INVALID_PAGE) {
-            STORE(&bp->warmup_cursor, i + 1, RELEASE);
-            return i;
         }
     }
 
@@ -337,7 +336,13 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
         target_queue = QUEUE_MAIN;
         sht_unset(bp->gindex, page_num);
     } else {
-        target_queue = QUEUE_QD;
+        // Check if QD has reasonable capacity
+        if (cq_size(&bp->qd) >= QD_SIZE) {
+            // QD saturated - bypass admission queue
+            target_queue = QUEUE_MAIN;
+        } else {
+            target_queue = QUEUE_QD;
+        }
     }
 
     rwsx_lock(&frame->fdata.latch, LATCH_EXCLUSIVE);

@@ -342,7 +342,6 @@ void test_eviction_skips_pinned_pages(void) {
     struct FrameHandle *handles[POOL_SIZE];
     for (u32 i = 0; i < POOL_SIZE; i++) {
         handles[i] = bpool_fetch_page(bp, i);
-        bpool_mark_read(bp, handles[i]);
         TEST_ASSERT_NOT_NULL(handles[i]);
     }
 
