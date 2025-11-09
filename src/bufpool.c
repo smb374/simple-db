@@ -356,8 +356,7 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
         pstore_write(bp->store, old_page, frame->fdata.data);
     }
 
-    u8 buf[PAGE_SIZE];
-    if (pstore_read(bp->store, page_num, buf) < 0) {
+    if (pstore_read(bp->store, page_num, frame->fdata.data) < 0) {
         int err = errno;
         STORE(&frame->fdata.loading, false, RELEASE);
         rwsx_unlock(&frame->fdata.latch, LATCH_EXCLUSIVE);
@@ -371,7 +370,6 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
                      (u64) page_num * PAGE_SIZE);
         abort();
     }
-    memcpy(frame->fdata.data, buf, PAGE_SIZE);
 
     STORE(&frame->is_dirty, false, RELEASE);
     STORE(&frame->visited, false, RELEASE);
