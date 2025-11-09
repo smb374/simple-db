@@ -273,7 +273,7 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
 }
 
 static void reclaim_ghost(struct BufPool *bp) {
-    if (cq_size(&bp->ghost) > POOL_SIZE) {
+    if (cq_size(&bp->ghost) >= POOL_SIZE) {
         u32 old_ghost_page = cq_pop(&bp->ghost);
         if (old_ghost_page != INVALID_PAGE) {
             sht_unset(bp->gindex, old_ghost_page);
