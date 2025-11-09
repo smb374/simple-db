@@ -5,21 +5,19 @@
 
 #include "utils.h"
 
-struct CNode {
-    u8 _pad[4];
-};
+#define Q_SENTINEL 0xFFFFFFFF
 
 struct CQ {
     atomic_u64 head, count;
     u64 tail, cap;
-    struct CNode *_Atomic *buf;
+    atomic_u32 *buf;
     bool is_alloc;
 };
 
 struct CQ *cq_init(struct CQ *q, size_t cap);
 void cq_destroy(struct CQ *q);
-bool cq_put(struct CQ *q, struct CNode *n);
-struct CNode *cq_pop(struct CQ *q);
+bool cq_put(struct CQ *q, u32 n);
+u32 cq_pop(struct CQ *q);
 size_t cq_size(struct CQ *q);
 size_t cq_cap(struct CQ *q);
 

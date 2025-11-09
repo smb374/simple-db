@@ -9,7 +9,7 @@
 #include "shtable.h"
 #include "utils.h"
 
-#define POOL_SIZE 8192
+#define POOL_SIZE 32768
 #define QD_SIZE (POOL_SIZE / 8) // 8 to be 2^n compared to 10 in source
 #define MAIN_SIZE POOL_SIZE
 
@@ -20,6 +20,7 @@ enum QueueType {
 };
 
 struct FrameData {
+    atomic_bool loading;
     struct RWSXLock latch;
     u8 data[PAGE_SIZE];
 };
@@ -41,17 +42,6 @@ struct FrameHandle {
     u32 epoch, frame_idx, page_num;
 };
 
-struct FNode {
-    struct CNode node;
-    u32 fidx;
-};
-
-struct GNode {
-    struct CNode node;
-    atomic_u32 page_num;
-    u32 gidx;
-};
-
 struct BufPool {
     // In-struct
     struct CQ qd, main, ghost;
@@ -60,10 +50,8 @@ struct BufPool {
     // Ptrs
     struct PageStore *store;
     struct PageFrame *frames;
-    struct SHTable *index; // page_num -> frame
-    struct SHTable *gindex; // page_num -> GNode
-    struct FNode *fnodes; // preallocated nodes
-    struct GNode *gnodes;
+    struct SHTable *index; // page_num -> frame_idx
+    struct SHTable *gindex; // page_num -> presence (for ghost)
 };
 
 // Pool API

@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "pagestore.h"
@@ -9,6 +10,28 @@
 #include "utils.h"
 
 #define TEST_DB_FILE "test_bufpool.db"
+
+// Timing macros for performance measurement
+#ifdef LOGGING
+#define START_TIMING()                                      \
+    struct timespec start_time, end_time;                   \
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+#define END_TIMING(test_name)                                                                         \
+    do {                                                                                              \
+        clock_gettime(CLOCK_MONOTONIC, &end_time);                                                   \
+        double elapsed = (end_time.tv_sec - start_time.tv_sec) +                                     \
+                         (end_time.tv_nsec - start_time.tv_nsec) / 1e9;                              \
+        logger(stderr, "TIMING", "%s: %.6f seconds (%.3f ms)\n", test_name, elapsed, elapsed * 1000.0); \
+    } while (0)
+#else
+#define START_TIMING()                                      \
+    do {                                                    \
+    } while (0)
+#define END_TIMING(test_name)                               \
+    do {                                                    \
+    } while (0)
+#endif
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -41,12 +64,14 @@ void test_bpool_init_and_destroy(void) {
     TEST_ASSERT_NOT_NULL(bp);
     TEST_ASSERT_EQUAL(ps, bp->store);
 
+    START_TIMING();
     // Verify all frames initialized
     for (u32 i = 0; i < POOL_SIZE; i++) {
         TEST_ASSERT_EQUAL(INVALID_PAGE, LOAD(&bp->frames[i].page_num, RELAXED));
         TEST_ASSERT_EQUAL(0, LOAD(&bp->frames[i].pin_cnt, RELAXED));
         TEST_ASSERT_FALSE(LOAD(&bp->frames[i].is_dirty, RELAXED));
     }
+    END_TIMING("test_bpool_init_and_destroy");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -64,6 +89,7 @@ void test_fetch_page_cold_load(void) {
     struct BufPool *bp = bpool_init(ps);
     TEST_ASSERT_NOT_NULL(bp);
 
+    START_TIMING();
     // Fetch page 5 (cold load)
     struct FrameHandle *h = bpool_fetch_page(bp, 5);
     TEST_ASSERT_NOT_NULL(h);
@@ -87,6 +113,7 @@ void test_fetch_page_cold_load(void) {
 
     bpool_mark_read(bp, h);
     bpool_release_handle(bp, h);
+    END_TIMING("test_fetch_page_cold_load");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -101,6 +128,7 @@ void test_fetch_page_hot(void) {
     fill_page_with_pattern(write_buf, 10, 0xBB);
     pstore_write(ps, 10, write_buf);
 
+    START_TIMING();
     struct FrameHandle *h1 = bpool_fetch_page(bp, 10);
     TEST_ASSERT_NOT_NULL(h1);
 
@@ -120,6 +148,7 @@ void test_fetch_page_hot(void) {
 
     bpool_mark_read(bp, h2);
     bpool_release_handle(bp, h2);
+    END_TIMING("test_fetch_page_hot");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -129,6 +158,7 @@ void test_mark_write_sets_dirty(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     struct FrameHandle *h = bpool_fetch_page(bp, 0);
     TEST_ASSERT_NOT_NULL(h);
 
@@ -146,6 +176,7 @@ void test_mark_write_sets_dirty(void) {
     TEST_ASSERT_TRUE(LOAD(&frame->is_dirty, RELAXED));
 
     bpool_release_handle(bp, h);
+    END_TIMING("test_mark_write_sets_dirty");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -155,6 +186,7 @@ void test_flush_dirty_page(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fetch and modify page
     struct FrameHandle *h = bpool_fetch_page(bp, 7);
     TEST_ASSERT_NOT_NULL(h);
@@ -179,6 +211,7 @@ void test_flush_dirty_page(void) {
     verify_page_pattern(read_buf, 7, 0xDD);
 
     bpool_release_handle(bp, h);
+    END_TIMING("test_flush_dirty_page");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -193,6 +226,7 @@ void test_flush_clean_page_no_write(void) {
     fill_page_with_pattern(write_buf, 3, 0x11);
     pstore_write(ps, 3, write_buf);
 
+    START_TIMING();
     // Fetch page (clean)
     struct FrameHandle *h = bpool_fetch_page(bp, 3);
     TEST_ASSERT_NOT_NULL(h);
@@ -207,6 +241,7 @@ void test_flush_clean_page_no_write(void) {
 
     bpool_mark_read(bp, h);
     bpool_release_handle(bp, h);
+    END_TIMING("test_flush_clean_page_no_write");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -216,6 +251,7 @@ void test_flush_all(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fetch and modify multiple pages
     struct FrameHandle *handles[5];
     for (u32 i = 0; i < 5; i++) {
@@ -240,6 +276,7 @@ void test_flush_all(void) {
 
         bpool_release_handle(bp, handles[i]);
     }
+    END_TIMING("test_flush_all");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -253,6 +290,7 @@ void test_multiple_handles_same_page(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     struct FrameHandle *h1 = bpool_fetch_page(bp, 0);
     TEST_ASSERT_NOT_NULL(h1);
 
@@ -272,6 +310,7 @@ void test_multiple_handles_same_page(void) {
     // Release again
     bpool_release_handle(bp, h2);
     TEST_ASSERT_EQUAL(0, LOAD(&frame->pin_cnt, RELAXED));
+    END_TIMING("test_multiple_handles_same_page");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -281,6 +320,7 @@ void test_handle_invalidation_after_release(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     struct FrameHandle *h = bpool_fetch_page(bp, 0);
     TEST_ASSERT_NOT_NULL(h);
 
@@ -290,6 +330,7 @@ void test_handle_invalidation_after_release(void) {
     // After release, handle is freed and should not be used
     // This test just verifies the handle release mechanism works
     // (Epoch validation is a safety canary for rare cases, not actively tested)
+    END_TIMING("test_handle_invalidation_after_release");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -303,6 +344,7 @@ void test_qd_to_main_promotion_on_visit(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fetch page (goes to QD queue)
     struct FrameHandle *h1 = bpool_fetch_page(bp, 0);
     TEST_ASSERT_NOT_NULL(h1);
@@ -329,6 +371,7 @@ void test_qd_to_main_promotion_on_visit(void) {
     TEST_ASSERT_EQUAL(0, LOAD(&bp->frames[h2->frame_idx].page_num, RELAXED));
 
     bpool_release_handle(bp, h2);
+    END_TIMING("test_qd_to_main_promotion_on_visit");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -338,6 +381,7 @@ void test_eviction_skips_pinned_pages(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fill pool and keep all pages pinned
     struct FrameHandle *handles[POOL_SIZE];
     for (u32 i = 0; i < POOL_SIZE; i++) {
@@ -361,6 +405,7 @@ void test_eviction_skips_pinned_pages(void) {
     for (u32 i = 1; i < POOL_SIZE; i++) {
         bpool_release_handle(bp, handles[i]);
     }
+    END_TIMING("test_eviction_skips_pinned_pages");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -370,6 +415,7 @@ void test_eviction_writes_back_dirty_page(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fill pool with dirty pages
     for (u32 i = 0; i < POOL_SIZE; i++) {
         struct FrameHandle *h = bpool_fetch_page(bp, i);
@@ -410,6 +456,7 @@ void test_eviction_writes_back_dirty_page(void) {
         }
     }
     TEST_ASSERT_TRUE(found_written);
+    END_TIMING("test_eviction_writes_back_dirty_page");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -423,6 +470,7 @@ void test_ghost_entry_created_on_qd_eviction(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 3);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Fill pool
     for (u32 i = 0; i < POOL_SIZE; i++) {
         struct FrameHandle *h = bpool_fetch_page(bp, i);
@@ -441,6 +489,7 @@ void test_ghost_entry_created_on_qd_eviction(void) {
     // Check that ghost index has some entries
     u32 ghost_size = cq_size(&bp->ghost);
     TEST_ASSERT_GREATER_THAN(0, ghost_size);
+    END_TIMING("test_ghost_entry_created_on_qd_eviction");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -450,6 +499,7 @@ void test_ghost_hit_promotes_to_main(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 3);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Load page 0 (goes to QD)
     struct FrameHandle *h1 = bpool_fetch_page(bp, 0);
     TEST_ASSERT_NOT_NULL(h1);
@@ -484,6 +534,7 @@ void test_ghost_hit_promotes_to_main(void) {
 
         bpool_release_handle(bp, h2);
     }
+    END_TIMING("test_ghost_hit_promotes_to_main");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -493,6 +544,7 @@ void test_ghost_queue_bounded_size(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 4);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Load many pages to create ghost entries (just fetch/release, no mark needed)
     for (u32 i = 0; i < POOL_SIZE * 3; i++) {
         struct FrameHandle *h = bpool_fetch_page(bp, i);
@@ -504,6 +556,7 @@ void test_ghost_queue_bounded_size(void) {
     // Ghost queue should not exceed POOL_SIZE
     u32 ghost_size = cq_size(&bp->ghost);
     TEST_ASSERT_LESS_OR_EQUAL(POOL_SIZE, ghost_size);
+    END_TIMING("test_ghost_queue_bounded_size");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -548,6 +601,7 @@ void test_concurrent_readers_same_page(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     const i32 NUM_READERS = 4;
     pthread_t threads[NUM_READERS];
     struct concurrent_reader_args args[NUM_READERS];
@@ -566,6 +620,7 @@ void test_concurrent_readers_same_page(void) {
         pthread_join(threads[i], NULL);
         TEST_ASSERT_EQUAL(0, args[i].result);
     }
+    END_TIMING("test_concurrent_readers_same_page");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -575,6 +630,7 @@ void test_concurrent_readers_different_pages(void) {
     struct PageStore *ps = pstore_create(NULL, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     const i32 NUM_READERS = 4;
     pthread_t threads[NUM_READERS];
     struct concurrent_reader_args args[NUM_READERS];
@@ -593,6 +649,7 @@ void test_concurrent_readers_different_pages(void) {
         pthread_join(threads[i], NULL);
         TEST_ASSERT_EQUAL(0, args[i].result);
     }
+    END_TIMING("test_concurrent_readers_different_pages");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -644,6 +701,7 @@ void test_concurrent_cold_load_same_page_no_duplicate(void) {
     u32 temp_idx;
     TEST_ASSERT_NOT_EQUAL(0, sht_get(bp->index, 42, &temp_idx));
 
+    START_TIMING();
     // Set up barrier for synchronization
     pthread_barrier_t barrier;
     pthread_barrier_init(&barrier, NULL, 2);
@@ -691,6 +749,8 @@ void test_concurrent_cold_load_same_page_no_duplicate(void) {
     TEST_ASSERT_EQUAL(0, LOAD(&frame->pin_cnt, RELAXED));
 
     pthread_barrier_destroy(&barrier);
+    END_TIMING("test_concurrent_cold_load_same_page_no_duplicate");
+
     bpool_destroy(bp);
     pstore_close(ps);
 }
@@ -766,6 +826,7 @@ void test_concurrent_write_and_flush_no_torn_write(void) {
     struct BufPool *bp = bpool_init(ps);
     TEST_ASSERT_NOT_NULL(bp);
 
+    START_TIMING();
     // Setup synchronization
     volatile bool writer_started = false;
     volatile bool writer_done = false;
@@ -796,6 +857,7 @@ void test_concurrent_write_and_flush_no_torn_write(void) {
             TEST_FAIL_MESSAGE("Detected torn write: page contains mix of 0x00 and 0xFF");
         }
     }
+    END_TIMING("test_concurrent_write_and_flush_no_torn_write");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -829,6 +891,7 @@ void test_concurrent_write_and_flush_all_no_torn_write(void) {
     struct BufPool *bp = bpool_init(ps);
     TEST_ASSERT_NOT_NULL(bp);
 
+    START_TIMING();
     volatile bool writer_started = false;
     volatile bool writer_done = false;
 
@@ -857,6 +920,7 @@ void test_concurrent_write_and_flush_all_no_torn_write(void) {
             TEST_FAIL_MESSAGE("Detected torn write in flush_all");
         }
     }
+    END_TIMING("test_concurrent_write_and_flush_all_no_torn_write");
 
     bpool_destroy(bp);
     pstore_close(ps);
@@ -872,6 +936,7 @@ void test_destroy_flushes_dirty_pages(void) {
     struct PageStore *ps = pstore_create(TEST_DB_FILE, POOL_SIZE * 2);
     struct BufPool *bp = bpool_init(ps);
 
+    START_TIMING();
     // Modify several pages
     for (u32 i = 0; i < 10; i++) {
         struct FrameHandle *h = bpool_fetch_page(bp, i);
@@ -899,6 +964,7 @@ void test_destroy_flushes_dirty_pages(void) {
         pstore_read(ps, i, read_buf);
         verify_page_pattern(read_buf, i, 0x55);
     }
+    END_TIMING("test_destroy_flushes_dirty_pages");
 
     pstore_close(ps);
     unlink(TEST_DB_FILE);

@@ -3,12 +3,30 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "cqueue.h"
 #include "pagestore.h"
 #include "rwsxlock.h"
 #include "shtable.h"
 #include "utils.h"
+
+static inline void spin_wait_loaded(struct PageFrame *frame) {
+    int spin = 0;
+    while (LOAD(&frame->fdata.loading, ACQUIRE)) {
+        if (spin < 5) {
+#if defined(__i386__) || defined(__x86_64__)
+            __asm__ __volatile__("pause");
+#elif defined(__aarch64__) || defined(__arm__)
+            __asm__ __volatile__("yield");
+#endif
+        } else {
+            int sleep_duration = spin - 5 < 9 ? spin - 5 : 9;
+            usleep(1 << sleep_duration);
+        }
+        spin++;
+    }
+}
 
 static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num);
 
@@ -24,14 +42,12 @@ static struct FrameHandle *create_handle(struct FrameData *fdata, const u32 epoc
 }
 
 struct BufPool *bpool_init(struct PageStore *store) {
-    struct BufPool *bp = calloc(1, sizeof(struct BufPool) + sizeof(u32) * POOL_SIZE);
+    struct BufPool *bp = calloc(1, sizeof(struct BufPool));
 
     bp->store = store;
     bp->index = sht_init(POOL_SIZE + PAGE_SIZE / 2); // MAX load factor = 75%
     bp->gindex = sht_init(POOL_SIZE + PAGE_SIZE / 2);
     bp->frames = calloc(POOL_SIZE, sizeof(struct PageFrame));
-    bp->fnodes = calloc(POOL_SIZE, sizeof(struct FNode));
-    bp->gnodes = calloc(POOL_SIZE, sizeof(struct GNode));
 
     bp->warmup_cursor = 0;
     cq_init(&bp->qd, QD_SIZE);
@@ -43,9 +59,6 @@ struct BufPool *bpool_init(struct PageStore *store) {
     for (u32 i = 0; i < POOL_SIZE; i++) {
         rwsx_init(&bp->frames[i].fdata.latch);
         bp->frames[i].page_num = INVALID_PAGE;
-        bp->gnodes[i].page_num = INVALID_PAGE;
-        bp->gnodes[i].gidx = i;
-        bp->fnodes[i].fidx = i;
     }
 
     return bp;
@@ -65,8 +78,6 @@ void bpool_destroy(struct BufPool *bp) {
     sht_destroy(bp->index);
     sht_destroy(bp->gindex);
     free(bp->frames);
-    free(bp->fnodes);
-    free(bp->gnodes);
     free(bp);
 }
 
@@ -98,6 +109,10 @@ struct FrameHandle *bpool_fetch_page(struct BufPool *bp, u32 page_num) {
 
         STORE(&frame->visited, true, RELEASE);
         rwsx_unlock(&bp->latch, LATCH_SHARED);
+
+        // Wait for loading to complete (if in progress)
+        spin_wait_loaded(frame);
+
         return create_handle(&frame->fdata, epoch, frame_idx, page_num);
     }
 
@@ -214,21 +229,19 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
 
     u32 qd_size = cq_size(&bp->qd);
     for (u32 i = 0; i < qd_size; i++) {
-        struct CNode *n = cq_pop(&bp->qd);
-        if (!n)
+        u32 frame_idx = cq_pop(&bp->qd);
+        if (frame_idx == INVALID_PAGE)
             break;
 
-        struct FNode *fn = container_of(n, struct FNode, node);
-        u32 frame_idx = fn->fidx;
         struct PageFrame *frame = &bp->frames[frame_idx];
 
         if (LOAD(&frame->visited, ACQUIRE)) {
             STORE(&frame->visited, false, RELEASE);
-            cq_put(&bp->main, &fn->node);
+            cq_put(&bp->main, frame_idx);
             continue;
         } else {
             if (LOAD(&frame->pin_cnt, ACQUIRE) > 0) {
-                cq_put(&bp->qd, &fn->node);
+                cq_put(&bp->qd, frame_idx);
                 continue;
             }
             return frame_idx;
@@ -237,21 +250,19 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
 
     u32 main_size = cq_size(&bp->main);
     for (u32 i = 0; i < main_size; i++) {
-        struct CNode *n = cq_pop(&bp->main);
-        if (!n)
+        u32 frame_idx = cq_pop(&bp->main);
+        if (frame_idx == INVALID_PAGE)
             break;
 
-        struct FNode *fn = container_of(n, struct FNode, node);
-        u32 frame_idx = fn->fidx;
         struct PageFrame *frame = &bp->frames[frame_idx];
 
         if (LOAD(&frame->visited, ACQUIRE)) {
             STORE(&frame->visited, false, RELEASE);
-            cq_put(&bp->main, &fn->node);
+            cq_put(&bp->main, frame_idx);
             continue;
         } else {
             if (LOAD(&frame->pin_cnt, ACQUIRE) > 0) {
-                cq_put(&bp->main, &fn->node);
+                cq_put(&bp->main, frame_idx);
                 continue;
             }
             return frame_idx;
@@ -261,22 +272,11 @@ static u32 find_victim_qdlp(struct BufPool *bp) {
     return INVALID_PAGE;
 }
 
-static struct GNode *find_free_ghost(struct BufPool *bp) {
-    for (u32 i = 0; i < POOL_SIZE; i++) {
-        if (LOAD(&bp->gnodes[i].page_num, ACQUIRE) == INVALID_PAGE) {
-            return &bp->gnodes[i];
-        }
-    }
-    return NULL;
-}
-
 static void reclaim_ghost(struct BufPool *bp) {
     if (cq_size(&bp->ghost) > POOL_SIZE) {
-        struct CNode *n = cq_pop(&bp->ghost);
-        if (n) {
-            struct GNode *gn = container_of(n, struct GNode, node);
-            sht_unset(bp->gindex, gn->page_num);
-            STORE(&gn->page_num, INVALID_PAGE, RELEASE);
+        u32 old_ghost_page = cq_pop(&bp->ghost);
+        if (old_ghost_page != INVALID_PAGE) {
+            sht_unset(bp->gindex, old_ghost_page);
         }
     }
 }
@@ -294,13 +294,16 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
     u32 frame_idx;
     if (sht_get(bp->index, page_num, &frame_idx) != -1) {
         struct PageFrame *frame = &bp->frames[frame_idx];
-        FADD(&frame->pin_cnt, 1, RELEASE);
         rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+
+        spin_wait_loaded(frame);
+
+        FADD(&frame->pin_cnt, 1, RELEASE);
         return frame;
     }
 
-    u32 gidx;
-    bool in_ghost = sht_get(bp->gindex, page_num, &gidx) != -1;
+    u32 dummy;
+    bool in_ghost = sht_get(bp->gindex, page_num, &dummy) != -1;
 
     u32 victim = find_victim_qdlp(bp);
     if (victim == INVALID_PAGE) {
@@ -314,31 +317,33 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
 
     if (old_page != INVALID_PAGE && old_qtype == QUEUE_QD) {
         reclaim_ghost(bp);
-        struct GNode *gn = find_free_ghost(bp);
-        if (gn) {
-            STORE(&gn->page_num, old_page, RELEASE);
-            sht_set(bp->gindex, old_page, gn->gidx);
-            cq_put(&bp->ghost, &gn->node);
-        }
+        cq_put(&bp->ghost, old_page);
+        sht_set(bp->gindex, old_page, 1);
     }
 
+    // Mark as loading BEFORE releasing latch
+    STORE(&frame->fdata.loading, true, RELEASE);
     STORE(&frame->pin_cnt, 1, RELEASE);
+
     if (old_page != INVALID_PAGE) {
         sht_unset(bp->index, old_page);
         FADD(&frame->epoch, 1, RELEASE);
     }
-    STORE(&frame->page_num, INVALID_PAGE, RELEASE);
-    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
 
+    // Set page_num and insert into index BEFORE releasing SX-latch
+    STORE(&frame->page_num, page_num, RELEASE);
+    sht_set(bp->index, page_num, victim); // Now visible to other threads!
+
+    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE); // Release early for I/O
+
+    // Flush old dirty page if needed (outside pool latch)
     bool was_dirty = (old_page != INVALID_PAGE) && LOAD(&frame->is_dirty, ACQUIRE);
 
     if (in_ghost) {
         target_queue = QUEUE_MAIN;
         sht_unset(bp->gindex, page_num);
     } else {
-        // Check if QD has reasonable capacity
         if (cq_size(&bp->qd) >= QD_SIZE) {
-            // QD saturated - bypass admission queue
             target_queue = QUEUE_MAIN;
         } else {
             target_queue = QUEUE_QD;
@@ -354,6 +359,14 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
     u8 buf[PAGE_SIZE];
     if (pstore_read(bp->store, page_num, buf) < 0) {
         int err = errno;
+        STORE(&frame->fdata.loading, false, RELEASE);
+        rwsx_unlock(&frame->fdata.latch, LATCH_EXCLUSIVE);
+
+        rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+        sht_unset(bp->index, page_num);
+        STORE(&frame->page_num, INVALID_PAGE, RELEASE);
+        rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
+
         error_logger(stderr, err, "Failed to read in-range page %u at offset %lu\n", page_num,
                      (u64) page_num * PAGE_SIZE);
         abort();
@@ -365,17 +378,14 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
     STORE(&frame->qtype, target_queue, RELEASE);
 
     if (target_queue == QUEUE_MAIN) {
-        cq_put(&bp->main, &bp->fnodes[victim].node);
+        cq_put(&bp->main, victim);
     } else {
-        cq_put(&bp->qd, &bp->fnodes[victim].node);
+        cq_put(&bp->qd, victim);
     }
 
-    rwsx_lock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-    STORE(&frame->page_num, page_num, RELEASE);
-    sht_set(bp->index, page_num, victim); // Visible to index
-    rwsx_unlock(&bp->latch, LATCH_SHARED_EXCLUSIVE);
-
     rwsx_unlock(&frame->fdata.latch, LATCH_EXCLUSIVE);
+
+    STORE(&frame->fdata.loading, false, RELEASE);
 
     return frame;
 }
