@@ -54,6 +54,8 @@ struct BufPool {
     struct SHTable *gindex; // page_num -> presence (for ghost)
 };
 
+static inline void *handle_data(struct FrameHandle *h) { return &h->fdata->data[0]; }
+
 // Pool API
 struct BufPool *bpool_init(struct PageStore *store);
 void bpool_destroy(struct BufPool *bp);

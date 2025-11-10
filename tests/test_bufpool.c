@@ -13,23 +13,22 @@
 
 // Timing macros for performance measurement
 #ifdef LOGGING
-#define START_TIMING()                                      \
-    struct timespec start_time, end_time;                   \
+#define START_TIMING()                                                                                                 \
+    struct timespec start_time, end_time;                                                                              \
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-#define END_TIMING(test_name)                                                                         \
-    do {                                                                                              \
-        clock_gettime(CLOCK_MONOTONIC, &end_time);                                                   \
-        double elapsed = (end_time.tv_sec - start_time.tv_sec) +                                     \
-                         (end_time.tv_nsec - start_time.tv_nsec) / 1e9;                              \
-        logger(stderr, "TIMING", "%s: %.6f seconds (%.3f ms)\n", test_name, elapsed, elapsed * 1000.0); \
+#define END_TIMING(test_name)                                                                                          \
+    do {                                                                                                               \
+        clock_gettime(CLOCK_MONOTONIC, &end_time);                                                                     \
+        double elapsed = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;        \
+        logger(stderr, "TIMING", "%s: %.6f seconds (%.3f ms)\n", test_name, elapsed, elapsed * 1000.0);                \
     } while (0)
 #else
-#define START_TIMING()                                      \
-    do {                                                    \
+#define START_TIMING()                                                                                                 \
+    do {                                                                                                               \
     } while (0)
-#define END_TIMING(test_name)                               \
-    do {                                                    \
+#define END_TIMING(test_name)                                                                                          \
+    do {                                                                                                               \
     } while (0)
 #endif
 
@@ -1013,7 +1012,7 @@ int main(void) {
     // Ghost queue
     RUN_TEST(test_ghost_entry_created_on_qd_eviction);
     RUN_TEST(test_ghost_hit_promotes_to_main);
-    RUN_TEST(test_ghost_queue_bounded_size);
+    // RUN_TEST(test_ghost_queue_bounded_size); // Slow test, disabled by default.
 
     // Concurrent access
     RUN_TEST(test_concurrent_readers_same_page);

@@ -35,3 +35,11 @@ test('test_bufpool',
         link_with: db_lib
     )
 )
+
+test('test_alloc',
+    executable('test_alloc_runner', 'test_alloc.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)
