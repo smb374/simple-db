@@ -29,6 +29,7 @@ This document describes the completed layered page management system for simple-
 ```
 
 **Implementation Status:**
+
 - ✅ Layer 1: Page Store - Complete
 - ✅ Layer 2: Buffer Pool - Complete
 - ✅ Layer 3: Page Allocator - Complete
@@ -197,6 +198,7 @@ Better than traditional CLOCK algorithm:
 4. **Lock-free queues:** MPSC queues use atomic operations
 
 **Queue Sizes:**
+
 - `QD_SIZE = POOL_SIZE / 8 = 4,096` (12.5% of pool)
 - `MAIN_SIZE = POOL_SIZE = 32,768` (100%, allows overflow from QD)
 - `GHOST_SIZE = POOL_SIZE = 32,768` (track recently evicted)
@@ -211,6 +213,7 @@ Better than traditional CLOCK algorithm:
 #### Concurrency Model
 
 **Two-level latching:**
+
 1. **Buffer pool latch (RWSXLock):** Protects TLB and eviction
    - S-latch: Hot path TLB lookups (concurrent)
    - SX-latch: Cold loads (allows concurrent hot path)
@@ -226,6 +229,7 @@ Better than traditional CLOCK algorithm:
 #### Hot vs Cold Path
 
 **Hot path (page in pool):**
+
 1. Acquire pool S-latch
 2. TLB lookup (hash table)
 3. Pin frame (atomic increment)
@@ -234,6 +238,7 @@ Better than traditional CLOCK algorithm:
 6. Spin-wait if loading
 
 **Cold path (page not in pool):**
+
 1. Acquire pool SX-latch (allows concurrent hot path!)
 2. Double-check TLB (DCLI pattern)
 3. Find victim using QDLP
@@ -319,6 +324,7 @@ void free_page(PageAllocator *pa, u32 page_num);
 #### Lock-Free Bitmap Allocation
 
 **Allocation uses `fetch_or` (atomic):**
+
 - Fetch bitmap pages with **S-latch** (not X-latch!)
 - Search for zero bit
 - Use `atomic_fetch_or` to set bit atomically
@@ -326,16 +332,11 @@ void free_page(PageAllocator *pa, u32 page_num);
 - Multiple allocators can search same bitmap concurrently
 
 **Deallocation uses `fetch_and` (atomic):**
+
 - Fetch bitmap page with S-latch
 - Use `atomic_fetch_and` to clear bit
 - No CAS loop needed (idempotent operation)
 - Single atomic instruction
-
-**Why S-latch instead of X-latch?**
-- Atomic operations don't require exclusive access
-- Multiple threads can search bitmaps simultaneously
-- 10-100× throughput improvement under contention
-- Synchronization happens at CPU instruction level
 
 #### DCLI Growth Pattern
 
@@ -353,6 +354,7 @@ void free_page(PageAllocator *pa, u32 page_num);
 **Key insight:** File I/O (~100ms) happens under SX-latch, which allows concurrent allocations from existing groups. Only metadata updates block other operations.
 
 **Race prevention:**
+
 - GDT descriptor initialized **before** incrementing `total_groups`
 - Uninitialized descriptors have `start = INVALID_PAGE`
 - Prevents allocators from accessing half-initialized groups
@@ -360,11 +362,13 @@ void free_page(PageAllocator *pa, u32 page_num);
 #### Metadata Management
 
 **Bypass buffer pool:**
+
 - SuperBlock and GDT use direct `pstore_read()`/`pstore_write()`
 - Avoids double-caching (once in cache, once in buffer pool)
 - Gives allocator direct control over metadata durability
 
 **CRC-32C checksums:**
+
 - SuperBlock checksum covers all fields except checksum itself
 - Each GDT page has its own checksum
 - Catalog page checksum (for future schema system)
@@ -372,6 +376,7 @@ void free_page(PageAllocator *pa, u32 page_num);
 - Detects corruption from crashes or bit rot
 
 **Flush strategy:**
+
 - Bitmap pages: Flushed only during group initialization
 - Runtime: Bitmap pages written on eviction or pool destroy
 - Metadata: Written on growth and allocator destroy
@@ -405,6 +410,7 @@ void free_page(PageAllocator *pa, u32 page_num);
 From InnoDB MySQL 8.0, supports three modes:
 
 **Compatibility Matrix:**
+
 ```
         S    X    SX
 S       ✓    ✗    ✓     ← Key: S and SX are compatible!
@@ -413,6 +419,7 @@ SX      ✓    ✗    ✗
 ```
 
 **Usage:**
+
 - **S (Shared):** Multiple readers, compatible with SX
 - **X (Exclusive):** Single writer, no other locks
 - **SX (Shared-Exclusive):** Single structural modifier + multiple readers
@@ -420,11 +427,13 @@ SX      ✓    ✗    ✗
 **DCLI Pattern for Upgrade Starvation Prevention:**
 
 The `upgrading` atomic flag prevents new S-latch acquisitions during SX→X upgrade:
+
 - S-latch acquisition checks `upgrading` flag and waits if true
 - Upgrade sets flag first, then waits for readers to drain
 - Prevents indefinite starvation of upgrader
 
 **API:**
+
 ```c
 void rwsx_lock(RWSXLock *lock, LatchMode mode);
 void rwsx_unlock(RWSXLock *lock, LatchMode mode);
@@ -437,6 +446,7 @@ i32 rwsx_downgrade_sx(RWSXLock *lock);  // Returns -1 if not holding X
 #### Circular Queue (MPSC)
 
 **Multi-Producer Single-Consumer queue:**
+
 - Used for QDLP eviction queues
 - Atomic operations for concurrent `cq_put()`
 - Single consumer (eviction) calls `cq_pop()`
@@ -445,6 +455,7 @@ i32 rwsx_downgrade_sx(RWSXLock *lock);  // Returns -1 if not holding X
 #### Hash Table (SHTable)
 
 **Single-level hash table:**
+
 - Used for TLB (page_num → frame_idx)
 - Linear probing for collision resolution
 - Not resizable (fixed size on creation)
@@ -465,6 +476,7 @@ SEQ_CST   // Sequentially consistent (strongest)
 ```
 
 **Key patterns:**
+
 - **Bitmap allocation:** `ACQUIRE` on load, `RELEASE` on modify
 - **Metadata updates:** `ACQ_REL` for atomic fetch-and-add
 - **Visibility:** Ensures changes visible across threads on weak memory models
@@ -511,11 +523,13 @@ SEQ_CST   // Sequentially consistent (strongest)
 ### Crash Recovery
 
 **If crash occurs:**
+
 - **Before bitmap flush:** New allocations lost (volatile memory)
 - **After bitmap flush, before metadata:** New group not visible (safe)
 - **After metadata flush:** New group fully visible and consistent
 
 **Checksums detect:**
+
 - Torn writes to metadata pages
 - Silent corruption (bit rot)
 - Incomplete transactions (future WAL integration)
@@ -527,17 +541,20 @@ SEQ_CST   // Sequentially consistent (strongest)
 ### Buffer Pool
 
 **Hot path (page in pool):**
+
 - TLB lookup: ~100-200ns (hash table + atomic pin)
 - S-latch on pool: High concurrency (unlimited concurrent lookups)
 - Frame latch: User-controlled (acquire only when needed)
 
 **Cold path (page not in pool):**
+
 - SX-latch on pool: Blocks other cold loads, allows hot path
 - Victim selection: ~1-10μs (QDLP queue scans)
 - I/O: ~10-50μs (page read from disk)
 - Total: ~15-70μs
 
 **Scalability:**
+
 - Hot path: Linear scalability with thread count
 - Cold path: Limited by SX-latch (1 cold load at a time)
 - Mixed workload: Hot path dominates, excellent concurrency
@@ -545,6 +562,7 @@ SEQ_CST   // Sequentially consistent (strongest)
 ### Page Allocator
 
 **Allocation:**
+
 - Fast path (group has free pages): ~1-5μs
   - TLB lookup for bitmap page
   - Bitmap scan with atomic CAS retry
@@ -555,6 +573,7 @@ SEQ_CST   // Sequentially consistent (strongest)
   - Metadata persistence
 
 **Concurrency:**
+
 - Multiple allocators: Lock-free bitmap operations
 - Growth: SX-latch allows concurrent allocations in existing groups
 - Natural segmentation: 128 bitmap pages (2 per group × 64 groups)
@@ -566,11 +585,13 @@ SEQ_CST   // Sequentially consistent (strongest)
 ### Unit Tests
 
 **Layer 1 (PageStore):**
+
 - File creation, read/write, growth
 - In-memory mode
 - Concurrent read/write (pread/pwrite thread-safety)
 
 **Layer 2 (Buffer Pool):**
+
 - Pin/unpin semantics
 - QDLP eviction (fill pool, verify behavior)
 - Concurrent fetch (multi-threaded)
@@ -578,6 +599,7 @@ SEQ_CST   // Sequentially consistent (strongest)
 - Handle epoch validation
 
 **Layer 3 (Allocator):**
+
 - Single-threaded alloc/free
 - Group exhaustion and growth
 - Concurrent allocation (no duplicates)
@@ -588,12 +610,14 @@ SEQ_CST   // Sequentially consistent (strongest)
 ### Integration Tests
 
 **Mixed workload:**
+
 - Allocate pages, write data via buffer pool, read back
 - Concurrent allocations with concurrent buffer pool access
 - Growth while buffer pool is active
 - Persist, reopen, verify data integrity
 
 **Crash simulation:**
+
 - Kill process during growth
 - Verify database opens correctly
 - Verify checksums detect corruption
