@@ -28,7 +28,7 @@ i32 sht_get(struct SHTable *t, u32 key, u32 *val_out) {
     assert(key != EMPTY && key != DELETED); // Keys cannot be sentinel values
 
     u8 kbytes[4];
-    store32be(key, kbytes);
+    store32le(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
     for (u32 i = 0; i < t->cap; i++) {
@@ -51,7 +51,7 @@ i32 sht_set(struct SHTable *t, u32 key, u32 val) {
     assert(key != EMPTY && key != DELETED);
 
     u8 kbytes[4];
-    store32be(key, kbytes);
+    store32le(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
     for (u32 i = 0; i < t->cap; i++) {
@@ -84,7 +84,7 @@ i32 sht_unset(struct SHTable *t, u32 key) {
     assert(key != EMPTY && key != DELETED);
 
     u8 kbytes[4];
-    store32be(key, kbytes);
+    store32le(key, kbytes);
     u32 hash = fnv1a_32(kbytes, 4);
 
     for (u32 i = 0; i < t->cap; i++) {
