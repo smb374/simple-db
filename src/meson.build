@@ -7,6 +7,7 @@ db_srcs = [
   './pagestore.c',
   './rwsxlock.c',
   './shtable.c',
+  './slot.c',
   './utils.c',
 ]
 db_lib = static_library('simple-db-lib', db_srcs, include_directories : inc)

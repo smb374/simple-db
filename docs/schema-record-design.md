@@ -390,51 +390,51 @@ data[]:
 
 ### BLOB Pointer (in main record)
 
+BLOBs larger than 1KB are stored in chain pages and referenced via pointers:
+
 ```c
 struct BlobPointer {
     u32 total_len;            // Total BLOB size
-    u32 first_page;           // First BLOB page
+    u32 first_page;           // First BLOB chain page
     u32 _reserved;            // Future: compression, encryption
 };
 // Size: 12 bytes
 ```
 
-### BLOB Page Format
+**Note:** BlobPointer is essentially a specialized VPtr for BLOB data. The catalog manages BLOB allocation using chain pages (not FSM-tracked).
+
+### BLOB Storage via Catalog
 
 ```c
-struct BlobPage {
-    u32 next_page;            // Next chunk, or INVALID_PAGE
+// Write BLOB (returns VPtr-style pointer)
+BlobPointer ptr;
+catalog_write_blob(catalog, blob_data, blob_len, &ptr);
+
+// Read BLOB
+u8 *buffer = malloc(ptr.total_len);
+catalog_read_blob(catalog, &ptr, buffer, ptr.total_len);
+
+// Free BLOB
+catalog_free_blob(catalog, &ptr);
+```
+
+### BLOB Page Format (ChainPage)
+
+BLOBs use the same ChainPage structure as huge records:
+
+```c
+struct ChainPage {
+    u32 next_page;            // Next chunk, or 0 if last
     u16 chunk_len;            // Data length in this page
     u8 _pad[2];
     u8 data[PAGE_SIZE - 8];   // ~4088 bytes per page
 };
 ```
 
-### BLOB Read Algorithm
-
-```c
-i32 read_blob(BlobPointer *ptr, u8 *output) {
-    u32 curr_page = ptr->first_page;
-    u32 remaining = ptr->total_len;
-    u32 offset = 0;
-
-    while (remaining > 0 && curr_page != INVALID_PAGE) {
-        PageFrame *frame = fetch_page(curr_page, LATCH_SHARED);
-        BlobPage *page = (BlobPage*)frame->data;
-
-        u32 chunk = MIN(page->chunk_len, remaining);
-        memcpy(output + offset, page->data, chunk);
-
-        offset += chunk;
-        remaining -= chunk;
-        curr_page = page->next_page;
-
-        unpin_page(curr_page, false);
-    }
-
-    return offset;
-}
-```
+**Benefits of using ChainPage:**
+- No slotting overhead (full page utilization)
+- Simple linked list traversal
+- No FSM tracking needed (always allocated as full pages)
 
 ---
 
@@ -732,69 +732,260 @@ void defrag_overflow_page(KeyOverflowPage *page) {
 
 ### Overflow Free Space Map (FSM)
 
-**Managed via linked lists in System Catalog:**
+**Managed via append-only FSM page chains:**
 
-The system catalog (page 131) stores three FSM class heads in `overflow_fsm[3]`:
-- **Class 0:** Pages with 0-500 bytes free
-- **Class 1:** Pages with 500-1500 bytes free
-- **Class 2:** Pages with 1500+ bytes free (prefer for allocation)
+The FSM uses a simple, append-only linked list design to avoid complex concurrent manipulation of multi-class linked lists.
 
-Each `KeyOverflowPage` includes:
-- `fsm_class`: Current free space class (0-2)
-- `fsm_next`: Next page in same class (linked list)
+**FSM Page Structure:**
+```c
+struct FSMPage {
+    u32 next_fsm_page;           // Next FSM page in chain (0 = end)
+    u32 num_entries;             // Number of entries in this page
 
-When free space changes (after alloc/free), update the class membership by:
-1. Remove page from old class list
-2. Insert page into new class list
+    struct FSMEntry {
+        u8 free_space;           // 0-255 scale (0 = full, 255 = empty)
+        u32 page_num;            // Actual data page number
+    } entries[800];              // ~800 entries per FSM page
+    // Remaining space reserved for future metadata
+};
+// Each entry: 5 bytes
+// Capacity: ~800 entries per FSM page (4000 bytes + header + reserved space)
+```
+
+**Data Page Back-Reference:**
+Each key overflow page stores a reference to its FSM page for fast updates:
+```c
+struct KeyOverflowPage {
+    u32 fsm_page_num;            // Which FSM page tracks this page
+    struct SlotHeap heap;        // Slotted heap for key storage
+    // ... rest of page
+};
+```
+
+**Free Space Encoding (0-255 scale):**
+- `0` = Full (0 bytes free)
+- `255` = Empty (full page available)
+- Scale: `fsm_value = (free_bytes * 255) / PAGE_SIZE`
 
 **Find page with space:**
 ```c
-u32 find_overflow_page_with_space(BufferPool *pool, u16 needed) {
-    SystemCatalog *catalog = get_system_catalog();
+u32 find_overflow_page_with_space(Catalog *catalog, u16 needed) {
+    u8 threshold = (needed * 255) / PAGE_SIZE;
 
-    // Try class 2 (most space) first
-    for (i32 cls = 2; cls >= 0; cls--) {
-        u32 page = catalog->overflow_fsm[cls];
-        while (page != INVALID_PAGE) {
-            PageFrame *frame = fetch_page(page, LATCH_SHARED);
-            KeyOverflowPage *kpage = (KeyOverflowPage*)frame->data;
+    // Walk FSM chain
+    u32 fsm_page_num = catalog->key_overflow_fsm_head;
+    while (fsm_page_num != 0) {
+        PageFrame *fsm_frame = fetch_page(fsm_page_num, LATCH_S);
+        FSMPage *fsm = (FSMPage *)fsm_frame->data;
 
-            u16 free = calculate_free_space(kpage);
-            if (free >= needed) {
-                unpin_page(page, false);
-                return page;
+        // Scan entries for sufficient space
+        for (u32 i = 0; i < fsm->num_entries; i++) {
+            if (fsm->entries[i].free_space >= threshold) {
+                u32 page_num = fsm->entries[i].page_num;
+                unpin_page(fsm_page_num, false);
+                return page_num;
             }
+        }
 
-            page = kpage->fsm_next;
-            unpin_page(page, false);
+        u32 next = fsm->next_fsm_page;
+        unpin_page(fsm_page_num, false);
+        fsm_page_num = next;
+    }
+
+    return INVALID_PAGE;  // No space found, allocate new data page
+}
+```
+
+**Update FSM after allocation/free:**
+```c
+void update_overflow_fsm(Catalog *catalog, u32 data_page_num, u16 free_bytes) {
+    // Get FSM page reference from data page
+    PageFrame *data_frame = fetch_page(data_page_num, LATCH_S);
+    KeyOverflowPage *data_page = (KeyOverflowPage *)data_frame->data;
+    u32 fsm_page_num = data_page->fsm_page_num;
+    unpin_page(data_page_num, false);
+
+    // Update FSM entry
+    PageFrame *fsm_frame = fetch_page(fsm_page_num, LATCH_X);
+    FSMPage *fsm = (FSMPage *)fsm_frame->data;
+
+    for (u32 i = 0; i < fsm->num_entries; i++) {
+        if (fsm->entries[i].page_num == data_page_num) {
+            fsm->entries[i].free_space = (free_bytes * 255) / PAGE_SIZE;
+            break;
         }
     }
 
-    return INVALID_PAGE;  // No space, allocate new page
+    unpin_page(fsm_page_num, true);
 }
+```
+
+**Allocate new data page (when all FSM pages are full):**
+```c
+u32 alloc_new_overflow_page(Catalog *catalog) {
+    // Find last FSM page in chain
+    u32 fsm_page_num = catalog->key_overflow_fsm_head;
+
+    if (fsm_page_num == 0) {
+        // First FSM page ever
+        fsm_page_num = page_alloc(allocator, PAGE_FSM);
+        catalog->key_overflow_fsm_head = fsm_page_num;
+        // Initialize FSM page
+    }
+
+    // Walk to last FSM page or find one with capacity
+    PageFrame *fsm_frame = fetch_page(fsm_page_num, LATCH_X);
+    FSMPage *fsm = (FSMPage *)fsm_frame->data;
+
+    while (fsm->next_fsm_page != 0) {
+        u32 next = fsm->next_fsm_page;
+        unpin_page(fsm_page_num, false);
+        fsm_page_num = next;
+        fsm_frame = fetch_page(fsm_page_num, LATCH_X);
+        fsm = (FSMPage *)fsm_frame->data;
+    }
+
+    // Check if current FSM page is full
+    if (fsm->num_entries >= 800) {
+        // Allocate new FSM page and append to chain
+        u32 new_fsm = page_alloc(allocator, PAGE_FSM);
+        fsm->next_fsm_page = new_fsm;
+        unpin_page(fsm_page_num, true);
+
+        fsm_page_num = new_fsm;
+        fsm_frame = fetch_page(fsm_page_num, LATCH_X);
+        fsm = (FSMPage *)fsm_frame->data;
+        fsm->next_fsm_page = 0;
+        fsm->num_entries = 0;
+    }
+
+    // Allocate new data page
+    u32 new_page = page_alloc(allocator, PAGE_KEY_OVERFLOW);
+
+    // Add entry to FSM
+    fsm->entries[fsm->num_entries].page_num = new_page;
+    fsm->entries[fsm->num_entries].free_space = 255;  // Fully free
+    fsm->num_entries++;
+    unpin_page(fsm_page_num, true);
+
+    // Initialize data page with FSM reference
+    PageFrame *data_frame = fetch_page(new_page, LATCH_X);
+    KeyOverflowPage *kpage = (KeyOverflowPage *)data_frame->data;
+    kpage->fsm_page_num = fsm_page_num;
+    // ... initialize SlotHeap
+    unpin_page(new_page, true);
+
+    return new_page;
+}
+```
+
+**Benefits:**
+- ✅ **Append-only:** No complex FSM class list reorganization
+- ✅ **Simple concurrency:** Mostly S-latches during search, X-latch only for updates
+- ✅ **Back-reference:** O(1) FSM update via data page → FSM page pointer
+- ✅ **Scalable:** ~800 data pages per FSM page, linear growth
+- ✅ **VACUUM-friendly:** Freed pages marked with free_space=255, compacted later
+
+---
+
+## 10. Data Storage Organization
+
+### Overview
+
+The database uses three types of data storage, all managed by the Catalog:
+
+1. **Slot Pages** - For normal-sized data (records, keys) using SlotHeap
+2. **Chain Pages** - For large data (huge records, BLOBs) using linked pages
+3. **FSM Pages** - Track free space in slot pages
+
+### Slot Pages (Normal Data)
+
+Used for:
+- Heap records (< ~3.5KB after BLOB extraction)
+- Key overflow data (keys > 16 bytes)
+
+```c
+struct SlotDataPage {
+    u32 fsm_page_num;            // Which FSM page tracks this page
+    struct SlotHeap heap;        // Embedded slotted heap (start = 4)
+    // Followed by slots[] and Cell data
+    // Each Cell: [u16 size | u8 data[size]]
+};
+```
+
+**Key properties:**
+- Back-reference to FSM page for O(1) free space updates
+- SlotHeap manages variable-sized cells with automatic defragmentation
+- Multiple records/keys per page (space efficient)
+
+### Chain Pages (Large Data)
+
+Used for:
+- Huge records (≥ ~3.5KB, rare)
+- BLOB columns (> 1KB threshold)
+
+```c
+struct ChainPage {
+    u32 next_page;               // Next chunk in chain (0 = end)
+    u16 chunk_len;               // Data length in this page
+    u8 _pad[2];
+    u8 data[PAGE_SIZE - 8];      // ~4088 bytes per page
+};
+```
+
+**Key properties:**
+- Simple linked list, no slotting overhead
+- No FSM tracking (always allocated as full pages)
+- Independent chains per large data item
+
+### Storage Decision Logic
+
+```c
+// For records
+if (record_size <= SLOT_PAGE_THRESHOLD) {
+    // Use slot page (managed by heap_fsm_head)
+    VPtr ptr = catalog_write(catalog, record_data, record_size);
+} else {
+    // Use chain pages (no FSM)
+    VPtr ptr = catalog_write_chain(catalog, record_data, record_size);
+}
+
+// For keys
+if (key_len > 16) {
+    // Always use slot pages (keys rarely > 3.5KB)
+    VPtr ptr = catalog_write_key(catalog, key_overflow_data, key_len - 16);
+}
+```
+
+**Thresholds:**
+```c
+#define SLOT_PAGE_THRESHOLD 3500  // Use chain if larger
 ```
 
 ---
 
-## 10. System Catalog
+## 11. System Catalog
 
-### System Catalog Page (Page 131)
+### Catalog Metadata Page (Page 131)
 
 ```c
-struct SystemCatalog {
-    u32 schema_btree_root;    // Root of schema metadata BTree
-    u32 next_table_id;        // Auto-increment for table IDs
-    u32 heap_fsm_root;        // Free space map for heap pages
+struct CatalogMetadata {
+    u32 schema_root;             // Root of schema metadata BTree
+    u32 next_table_id;           // Auto-increment for table IDs
 
-    // Overflow key management
-    u32 overflow_fsm[3];      // Heads of FSM classes for key overflow pages
-                              // [0]: 0-500B free
-                              // [1]: 500-1500B free
-                              // [2]: 1500+B free
+    // FSM chain heads (append-only linked lists)
+    u32 heap_fsm_head;           // FSM for heap slot pages
+    u32 key_overflow_fsm_head;   // FSM for key overflow slot pages
 
-    u32 _reserved[9];
+    u32 _reserved[12];
 };
 ```
+
+**FSM organization:**
+- Each data type (heap, key overflow) has its own FSM chain
+- FSM pages form a simple linked list (append-only)
+- No multi-class lists - just one chain per data type
+- VACUUM can compact sparse FSM pages
 
 ### Schema BTree
 
@@ -836,7 +1027,74 @@ struct ColumnDef {
 
 ---
 
-## 11. Record Lifecycle
+## 12. Catalog Data Management Interface
+
+The Catalog provides a unified interface for all data storage operations, abstracting away the complexity of FSM management and storage type selection.
+
+### Core Operations
+
+```c
+struct Catalog {
+    BufPool *bp;
+    PageAllocator *allocator;
+
+    u32 schema_root;
+    u32 heap_fsm_head;
+    u32 key_overflow_fsm_head;
+};
+
+// Initialize catalog (loads metadata from page 131)
+Catalog* catalog_init(BufPool *bp, PageAllocator *allocator);
+
+// Write data (automatically chooses slot vs chain)
+VPtr catalog_write(Catalog *c, const u8 *data, u32 size);
+
+// Write key overflow (always uses slot pages)
+VPtr catalog_write_key(Catalog *c, const u8 *key_data, u16 size);
+
+// Write BLOB (always uses chain pages)
+void catalog_write_blob(Catalog *c, const u8 *blob_data, u32 size, BlobPointer *out_ptr);
+
+// Read data from VPtr
+i32 catalog_read(Catalog *c, VPtr ptr, u8 *out_data, u32 *out_size);
+
+// Read BLOB
+i32 catalog_read_blob(Catalog *c, const BlobPointer *ptr, u8 *out_data, u32 buf_size);
+
+// Free storage
+void catalog_free(Catalog *c, VPtr ptr);
+void catalog_free_blob(Catalog *c, const BlobPointer *ptr);
+
+// Destroy catalog
+void catalog_destroy(Catalog *c);
+```
+
+### VPtr (Value Pointer)
+
+Unified pointer type for all slot-based storage:
+
+```c
+struct VPtr {
+    u32 page_num;
+    union {
+        u32 size;                    // For chain pages: total data size
+        struct {
+            u16 slot;                // For slot pages: slot index
+            u8 is_key;               // Distinguishes data vs key slots
+            u8 _pad;
+        } slot_info;
+    };
+};
+```
+
+**Usage:**
+- Slot pages: `page_num` + `slot` + `is_key` flag
+- Chain pages: `page_num` + `size`
+- Catalog automatically determines storage type during read/write
+
+---
+
+## 13. Record Lifecycle
 
 ### Insert
 
@@ -986,9 +1244,23 @@ struct SchemaVersion {
 ✅ **16-byte inline keys** (UUID) + overflow for larger keys
 ✅ **FNV-1a hash** for fast inequality checks (especially composite keys)
 ✅ **1KB BLOB threshold** for separate storage
-✅ **2KB main record target** before overflow
+✅ **3.5KB slot page threshold** before using chain pages
 ✅ **256 column limit** (u8 for num_cols)
 ✅ **Record relocation** allowed for better locality
+
+### Data Management Design
+
+✅ **Append-only FSM chains** - Simple, concurrent-friendly free space tracking
+✅ **Slot pages for normal data** - SlotHeap with Cell format for records/keys < 3.5KB
+✅ **Chain pages for large data** - Simple linked list for huge records/BLOBs
+✅ **Back-reference pointers** - Data pages track their FSM page for O(1) updates
+✅ **Unified VPtr interface** - Catalog abstracts storage type selection
+✅ **Separate FSM chains** - Independent tracking for heap vs key overflow pages
+
+**FSM Scalability:**
+- ~800 data pages per FSM page
+- For 1M data pages: ~1,250 FSM pages (~5MB overhead)
+- Linear growth, append-only (no complex list reorganization)
 
 ### Fan-out Summary
 
@@ -997,13 +1269,32 @@ struct SchemaVersion {
 - **Secondary leaf:** ~58-62 entries per page
 - **Tree height:** 3-4 levels for 1M-70M records
 
+### Implementation Modules
+
+1. **`slot.h/c`** - SlotHeap for in-page slotting (✅ implemented)
+2. **`schema.h/c`** - Type definitions, structures, constants
+3. **`catalog.h/c`** - FSM management, data allocation, VPtr abstraction
+4. **`record.h/c`** - Record encode/decode, KeyRef operations
+5. **`btree.h/c`** - BTree implementation (future)
+
 ### Next Steps
 
-With schema/record design locked in, the next discussion:
+With schema/record/storage design finalized:
 
-**BTree Implementation Details**
+**1. Catalog Implementation**
+- FSM page allocation and management
+- Slot page allocation (heap, key overflow)
+- Chain page allocation (huge records, BLOBs)
+- VPtr read/write/free operations
 
-1. Latch coupling for concurrent access
-2. Node split/merge algorithms
-3. Bulk loading for initial table creation
-4. Prefix compression (future optimization)
+**2. Record Layer**
+- Record encoding (header + null bitmap + COT + data)
+- BLOB extraction and storage via catalog
+- KeyRef construction with overflow handling
+- Record decoding and column extraction
+
+**3. BTree Implementation**
+- Latch coupling for concurrent access
+- Node split/merge algorithms
+- Bulk loading for initial table creation
+- Prefix compression (future optimization)
