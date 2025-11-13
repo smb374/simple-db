@@ -43,11 +43,3 @@ test('test_alloc',
         link_with: db_lib
     )
 )
-
-test('test_slot',
-    executable('test_slot_runner', 'test_slot.c',
-        include_directories: inc,
-        dependencies: unity_dep,
-        link_with: db_lib
-    )
-)

@@ -1,12 +1,16 @@
 #ifndef SLOT_H
 #define SLOT_H
 
+#include "bufpool.h"
+#include "page.h"
 #include "utils.h"
 
 #define INVALID_SLOT 0xFFFF
 
-struct SlotHeap {
-    u16 start;
+struct SlotPage {
+    struct PageHeader header; // Generic header
+    u32 fsm_index; // FSM index page for updating free_space.
+    u16 fsm_slot; // FSM slot
     u16 nslots;
     u16 free_offset;
     u16 frag_bytes;
@@ -19,10 +23,12 @@ struct Cell {
     u8 data[];
 };
 
-void slot_init(struct SlotHeap *sh, u16 start);
-u16 slot_alloc(struct SlotHeap *sh, u16 size);
-void slot_free(struct SlotHeap *sh, u16 slot);
-struct Cell *slot_get(struct SlotHeap *sh, u16 slot);
-void slot_defrag(struct SlotHeap *sh);
+struct SlotPage *slot_init(struct FrameHandle *h, u32 fsm_index, u16 fsm_slot);
+struct SlotPage *slot_open(struct FrameHandle *h, u32 fsm_index, u16 fsm_slot);
+void slot_update_checksum(struct SlotPage *sh);
+u16 slot_alloc(struct SlotPage *sh, u16 size);
+void slot_free(struct SlotPage *sh, u16 slot);
+struct Cell *slot_get(struct SlotPage *sh, u16 slot);
+void slot_defrag(struct SlotPage *sh);
 
 #endif /* ifndef SLOT_H */
