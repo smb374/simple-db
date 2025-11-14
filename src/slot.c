@@ -23,11 +23,11 @@ struct SlotPage *slot_init(struct FrameHandle *h, u32 fsm_index, u16 fsm_slot) {
     return sh;
 }
 
-struct SlotPage *slot_open(struct FrameHandle *h, u32 fsm_index, u16 fsm_slot) {
+struct SlotPage *slot_open(struct FrameHandle *h) {
     if (!h)
         return NULL;
     struct SlotPage *sh = (void *) h->fdata->data;
-    if (!verify_checksum(&sh->header) || sh->fsm_index != fsm_index || sh->fsm_slot != fsm_slot) {
+    if (!verify_checksum(&sh->header)) {
         return NULL;
     }
 

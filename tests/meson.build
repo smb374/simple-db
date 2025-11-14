@@ -43,3 +43,11 @@ test('test_alloc',
         link_with: db_lib
     )
 )
+
+test('test_catalog',
+    executable('test_catalog_runner', 'test_catalog.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

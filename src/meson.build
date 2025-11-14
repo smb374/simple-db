@@ -4,6 +4,7 @@ db_srcs = [
   './alloc.c',
   './bufpool.c',
   './cqueue.c',
+  './catalog.c',
   './pagestore.c',
   './rwsxlock.c',
   './shtable.c',

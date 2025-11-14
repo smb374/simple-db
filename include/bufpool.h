@@ -68,4 +68,8 @@ i32 bpool_mark_read(struct BufPool *bp, struct FrameHandle *h);
 i32 bpool_mark_write(struct BufPool *bp, struct FrameHandle *h);
 i32 bpool_release_handle(struct BufPool *bp, struct FrameHandle *h);
 
+// Helpers
+struct FrameHandle *bpool_acquire_page(struct BufPool *bp, u32 page_num, LatchMode mode);
+i32 bpool_release_page(struct BufPool *bp, struct FrameHandle *h, bool is_write, LatchMode mode);
+
 #endif /* ifndef BUFPOOL_H */

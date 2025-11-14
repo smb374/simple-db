@@ -386,3 +386,28 @@ static struct PageFrame *cold_load_page(struct BufPool *bp, u32 page_num) {
 
     return frame;
 }
+
+struct FrameHandle *bpool_acquire_page(struct BufPool *bp, u32 page_num, LatchMode mode) {
+    struct FrameHandle *h = bpool_fetch_page(bp, page_num);
+    if (!h)
+        return NULL;
+
+    rwsx_lock(&h->fdata->latch, mode);
+    return h;
+}
+
+i32 bpool_release_page(struct BufPool *bp, struct FrameHandle *h, bool is_write, LatchMode mode) {
+    if (!h)
+        return -1;
+    rwsx_unlock(&h->fdata->latch, mode);
+
+    if (is_write) {
+        if (bpool_mark_write(bp, h) < 0)
+            return -1;
+    } else {
+        if (bpool_mark_read(bp, h) < 0)
+            return -1;
+    }
+
+    return bpool_release_handle(bp, h);
+}
