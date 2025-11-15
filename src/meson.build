@@ -6,6 +6,7 @@ db_srcs = [
   './cqueue.c',
   './catalog.c',
   './pagestore.c',
+  './record.c',
   './rwsxlock.c',
   './shtable.c',
   './slot.c',

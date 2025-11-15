@@ -392,14 +392,16 @@ struct FrameHandle *bpool_acquire_page(struct BufPool *bp, u32 page_num, LatchMo
     if (!h)
         return NULL;
 
-    rwsx_lock(&h->fdata->latch, mode);
+    if (mode != LATCH_NONE)
+        rwsx_lock(&h->fdata->latch, mode);
     return h;
 }
 
 i32 bpool_release_page(struct BufPool *bp, struct FrameHandle *h, bool is_write, LatchMode mode) {
     if (!h)
         return -1;
-    rwsx_unlock(&h->fdata->latch, mode);
+    if (mode != LATCH_NONE)
+        rwsx_unlock(&h->fdata->latch, mode);
 
     if (is_write) {
         if (bpool_mark_write(bp, h) < 0)

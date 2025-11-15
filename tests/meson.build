@@ -51,3 +51,11 @@ test('test_catalog',
         link_with: db_lib
     )
 )
+
+test('test_record',
+    executable('test_record_runner', 'test_record.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

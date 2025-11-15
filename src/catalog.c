@@ -352,7 +352,7 @@ struct FrameHandle *catalog_get_slot_page(struct Catalog *c, const struct VPtr *
 }
 
 struct VPtr catalog_write_data(struct Catalog *c, const u8 *data, u32 len) {
-    if (len >= NORMAL_DATA_LIMIT) {
+    if (len > NORMAL_DATA_LIMIT) {
         return catalog_write_huge_data(c, data, len);
     } else {
         return catalog_write_normal_data(c, data, len, false);
@@ -360,7 +360,7 @@ struct VPtr catalog_write_data(struct Catalog *c, const u8 *data, u32 len) {
 }
 
 struct VPtr catalog_write_key(struct Catalog *c, const u8 *key_data, u16 len) {
-    if (len >= NORMAL_DATA_LIMIT) {
+    if (len > NORMAL_DATA_LIMIT) {
         return catalog_write_huge_data(c, key_data, len);
     } else {
         return catalog_write_normal_data(c, key_data, len, true);
