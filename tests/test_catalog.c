@@ -344,7 +344,7 @@ void test_catalog_boundary_normal_limit(void) {
     TEST_ASSERT_NOT_EQUAL(INVALID_PAGE, ptr_under.page_num);
 
     // Test data at the limit (should use chain pages)
-    u32 at_limit = NORMAL_DATA_LIMIT;
+    u32 at_limit = NORMAL_DATA_LIMIT + 1;
     u8 *data_at = malloc(at_limit);
     TEST_ASSERT_NOT_NULL(data_at);
     memset(data_at, 0xDD, at_limit);

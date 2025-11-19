@@ -1,10 +1,12 @@
 #include "record.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "catalog.h"
 #include "pagestore.h"
+#include "schema.h"
 #include "utils.h"
 
 // memcmp friendly encoding
@@ -127,4 +129,182 @@ error:
     free(kbuf);
 
     return -1;
+}
+
+static inline bool record_col_null(const struct RecordHeader *header, u16 cidx) {
+    return (header->null_bitmap[cidx / 8] >> (cidx % 8)) & 1;
+}
+
+static inline bool is_var_type(u8 tag) {
+    switch (tag & 0xF) {
+        case TYPE_DECIMAL:
+        case TYPE_TEXT:
+        case TYPE_BLOB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static inline u16 fixed_type_size(u8 tag) {
+    switch (tag & 0xF) {
+        case TYPE_BOOL:
+            return 1;
+        case TYPE_INTEGER:
+        case TYPE_REAL:
+        case TYPE_TIMESTAMP:
+            return 8;
+        case TYPE_UUID:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
+i32 record_encode(const struct MemRecord *rec, u8 *buf, const u32 cap, u32 *out_size) {
+    u8 ncols = rec->header.ncols;
+    const struct MemSchema *sch = rec->schema;
+    u32 cursor = ncols * sizeof(u16);
+    u16 *cot = (u16 *) buf;
+    u64 numeric_buf;
+
+    u8 vcols[MAX_COLUMNS];
+    u16 vtop = 0;
+
+    for (u8 i = 0; i < ncols; i++) {
+        if (record_col_null(&rec->header, i)) {
+            cot[i] = 0;
+            continue;
+        } else if (is_var_type(sch->defs[i].tag)) {
+            vcols[vtop++] = i;
+            continue;
+        }
+
+        u16 size = fixed_type_size(sch->defs[i].tag);
+        if (cursor >= cap - size)
+            return -1;
+
+        switch (sch->defs[i].tag & 0xF) {
+            case TYPE_BOOL:
+                cot[i] = cursor;
+                buf[cot[i]] = *(bool *) rec->cols[i];
+                break;
+            case TYPE_INTEGER:
+            case TYPE_REAL:
+            case TYPE_TIMESTAMP:
+                cot[i] = cursor;
+                memcpy(&numeric_buf, rec->cols[i], 8);
+                store64le(numeric_buf, &buf[cot[i]]);
+                break;
+            case TYPE_UUID:
+                cot[i] = cursor;
+                memcpy(&buf[cot[i]], rec->cols[i], 16);
+                break;
+            default:
+                break;
+        }
+        cursor += size;
+    }
+
+    for (u16 i = 0; i < vtop; i++) {
+        u8 idx = vcols[i];
+        u16 ssize = MIN(rec->col_size[idx], COL_OVERFLOW_THRES);
+        if (cursor >= cap - (ssize + 2))
+            return -1;
+
+        cot[idx] = cursor;
+        store16le(rec->col_size[idx], &buf[cot[idx]]);
+        memcpy(&buf[cot[idx] + 2], rec->cols[idx], ssize);
+
+        cursor += ssize + 2;
+    }
+
+    *out_size = cursor;
+
+    return 0;
+}
+
+struct MemRecord *record_decode(const struct MemSchema *schema, const struct RecordHeader *header, const u8 *buf,
+                                u32 bsize) {
+    struct MemRecord *rec = calloc(1, sizeof(struct MemRecord));
+
+    memcpy(&rec->header, header, sizeof(struct RecordHeader));
+    rec->schema = schema;
+    u8 ncols = rec->header.ncols;
+    u16 *cot = (u16 *) buf;
+
+    for (u8 i = 0; i < ncols; i++) {
+        if (record_col_null(header, i)) {
+            rec->cols[i] = NULL;
+            rec->col_size[i] = 0;
+            continue;
+        }
+        u16 off = cot[i];
+        u16 size;
+
+        if (is_var_type(schema->defs[i].tag)) {
+            size = load16le(&buf[off]);
+            off += 2;
+        } else {
+            size = fixed_type_size(schema->defs[i].tag);
+        }
+        u16 ssize = MIN(size, COL_OVERFLOW_THRES); // size directly stored in record data
+        if (off >= bsize - ssize) {
+            goto error;
+        }
+        rec->col_size[i] = size;
+        rec->cols[i] = calloc(1, size);
+        memcpy(rec->cols[i], &buf[off], ssize);
+    }
+
+    return rec;
+
+error:
+    free_record(rec);
+    return NULL;
+}
+
+void free_record(struct MemRecord *rec) {
+    for (u8 i = 0; i < rec->header.ncols; i++) {
+        if (rec->cols[i] != NULL) {
+            free(rec->cols[i]);
+        }
+    }
+    free(rec);
+}
+
+
+i32 record_overflow_cols(struct Catalog *c, struct MemRecord *rec) {
+    for (u8 i = 0; i < rec->header.ncols; i++) {
+        const u16 size = rec->col_size[i];
+        if (size > COL_OVERFLOW_THRES) {
+            const u16 suff_start = COL_PREFIX_SIZE;
+            u8 *col_bytes = rec->cols[i];
+
+            struct VPtr ptr = catalog_write_data(c, &col_bytes[suff_start], size - suff_start);
+            if (ptr.page_num == INVALID_PAGE)
+                return -1;
+
+            memcpy(&col_bytes[suff_start], &ptr, sizeof(struct VPtr));
+        }
+    }
+    return 0;
+}
+
+i32 record_recover_cols(struct Catalog *c, struct MemRecord *rec) {
+    for (u8 i = 0; i < rec->header.ncols; i++) {
+        const u16 size = rec->col_size[i];
+        if (size > COL_OVERFLOW_THRES) {
+            const u16 suff_start = COL_PREFIX_SIZE;
+            u8 *col_bytes = rec->cols[i];
+            struct VPtr ptr;
+
+            memcpy(&ptr, &col_bytes[suff_start], sizeof(struct VPtr));
+            if (ptr.page_num == INVALID_PAGE)
+                return -1;
+            if (catalog_read(c, &ptr, &col_bytes[suff_start], size > NORMAL_DATA_LIMIT) < 0)
+                return -1;
+        }
+    }
+    return 0;
 }
