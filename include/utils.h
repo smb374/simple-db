@@ -28,6 +28,7 @@ i32 open_relative(const char *path, i32 flag, mode_t mode);
 u32 fnv1a_32(const u8 *data, size_t len);
 u32 crc32c(const u8 *data, size_t len);
 i32 ffz(u64 input);
+void print_bytes(const u8 *byt, size_t len);
 
 // Atomics
 typedef _Atomic(u8) atomic_u8;

@@ -47,6 +47,25 @@ void logger(FILE *f, const char *tag, const char *format, ...) {
 #endif
 }
 
+static char *hexc = "0123456789ABCDEF";
+
+void print_bytes(const u8 *byt, const size_t len) {
+    u8 buf[8193];
+    size_t c = 0;
+    buf[8192] = 0;
+    while (c < len) {
+        size_t sz = MIN(4096, len - c);
+        for (size_t i = 0; i < sz * 2; i += 2) {
+            buf[i] = hexc[byt[c] & 0x0F];
+            buf[i + 1] = hexc[(byt[c] & 0xF0) >> 4];
+            c++;
+        }
+
+        printf("%s", buf);
+    }
+    puts("\n");
+}
+
 i32 open_relative(const char *path, i32 flag, mode_t mode) {
     char fpath[PATH_MAX + 1];
     i32 dfd, fd;

@@ -59,3 +59,11 @@ test('test_record',
         link_with: db_lib
     )
 )
+
+test('test_record_enc',
+    executable('test_record_enc_runner', 'test_record_enc.c',
+        include_directories: inc,
+        dependencies: unity_dep,
+        link_with: db_lib
+    )
+)

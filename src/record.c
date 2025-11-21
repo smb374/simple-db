@@ -1,6 +1,7 @@
 #include "record.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -181,7 +182,7 @@ i32 record_encode(const struct MemRecord *rec, u8 *buf, const u32 cap, u32 *out_
         }
 
         u16 size = fixed_type_size(sch->defs[i].tag);
-        if (cursor >= cap - size)
+        if (cap < size || cursor > cap - size)
             return -1;
 
         switch (sch->defs[i].tag & 0xF) {
@@ -209,7 +210,7 @@ i32 record_encode(const struct MemRecord *rec, u8 *buf, const u32 cap, u32 *out_
     for (u16 i = 0; i < vtop; i++) {
         u8 idx = vcols[i];
         u16 ssize = MIN(rec->col_size[idx], COL_OVERFLOW_THRES);
-        if (cursor >= cap - (ssize + 2))
+        if (cap < (ssize + 2) || cursor > cap - (ssize + 2))
             return -1;
 
         cot[idx] = cursor;
@@ -249,7 +250,7 @@ struct MemRecord *record_decode(const struct MemSchema *schema, const struct Rec
             size = fixed_type_size(schema->defs[i].tag);
         }
         u16 ssize = MIN(size, COL_OVERFLOW_THRES); // size directly stored in record data
-        if (off >= bsize - ssize) {
+        if (off > bsize - ssize) {
             goto error;
         }
         rec->col_size[i] = size;
@@ -302,7 +303,7 @@ i32 record_recover_cols(struct Catalog *c, struct MemRecord *rec) {
             memcpy(&ptr, &col_bytes[suff_start], sizeof(struct VPtr));
             if (ptr.page_num == INVALID_PAGE)
                 return -1;
-            if (catalog_read(c, &ptr, &col_bytes[suff_start], size > NORMAL_DATA_LIMIT) < 0)
+            if (catalog_read(c, &ptr, &col_bytes[suff_start], (size - suff_start) > NORMAL_DATA_LIMIT) < 0)
                 return -1;
         }
     }
